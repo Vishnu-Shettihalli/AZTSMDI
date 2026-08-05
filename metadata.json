@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix ShadowGate: Adaptive Deception Security",
+  "description": "Silently traps suspicious logins in a fake environment to monitor behavior and generate detailed attacker intent reports for admins.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
