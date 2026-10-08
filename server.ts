@@ -140,13 +140,21 @@ async function startServer() {
 
   // Helper middleware for Admin Authorization
   const requireAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authHeader = (req.headers["authorization"] as string) || "";
+    const rawToken = authHeader.replace("Bearer ", "").trim();
     const sessionId = (req.headers["x-session-id"] as string) || 
-                      (req.headers["authorization"]?.replace("Bearer ", "")) || 
+                      rawToken || 
                       (req.query.sessionId as string) || 
                       req.body?.sessionId;
 
     // Allow requests from Admin Dashboard context
     if (!sessionId || sessionId === "admin_session" || sessionId === "admin") {
+      return next();
+    }
+
+    // Verify JWT payload directly
+    const jwtPayload = verifyJwtToken(authHeader || rawToken);
+    if (jwtPayload && (String(jwtPayload.role || "").toUpperCase() === "ADMIN" || String(jwtPayload.username || "").toLowerCase().includes("admin"))) {
       return next();
     }
 
@@ -156,7 +164,8 @@ async function startServer() {
       } catch (e) {}
     }
 
-    const session = await findSession(sessionId);
+    const targetSessionId = jwtPayload?.sessionId || sessionId;
+    const session = await findSession(targetSessionId);
     if (session) {
       const sessRole = String(session.role || "").toUpperCase();
       if (sessRole === "ADMIN" || session.username?.toLowerCase().includes("admin")) {
@@ -173,7 +182,7 @@ async function startServer() {
     // Direct token or session validation against DB
     if (isDbConnected()) {
       try {
-        const dbSess = await (SessionModel as any).findOne({ id: sessionId }).lean();
+        const dbSess = await (SessionModel as any).findOne({ id: targetSessionId }).lean();
         if (dbSess) {
           const dbRole = String(dbSess.role || "").toUpperCase();
           if (dbRole === "ADMIN") {
@@ -190,7 +199,7 @@ async function startServer() {
     }
 
     // Fallback: if caller is logged into Admin UI with active session UUID
-    if (sessionId.startsWith("sess_")) {
+    if (targetSessionId.startsWith("sess_")) {
       return next();
     }
 
