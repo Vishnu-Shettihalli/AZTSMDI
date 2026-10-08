@@ -5,7 +5,6 @@ import express from "express";
 import helmet from "helmet";
 import bcrypt from "bcryptjs";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { fileURLToPath } from "url";
 import {
   sessions,
@@ -728,6 +727,7 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
   // ==========================================
 
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa"
