@@ -301,13 +301,26 @@ export default function AdminDashboard() {
 
       if (pollData.status === "success") {
         const fetchedSessions: Session[] = pollData.sessions || [];
-        setActiveSessions(fetchedSessions);
-        setAlertsList(pollData.alerts || []);
-        setStats(pollData.stats || null);
-        setEmployeesList(pollData.employees || []);
-        if (fetchedSessions.length > 0 && !selectedSessionId) {
-          setSelectedSessionId(fetchedSessions[0].id);
+        if (fetchedSessions.length > 0) {
+          setActiveSessions(prev => {
+            const map = new Map(prev.map(s => [s.id, s]));
+            fetchedSessions.forEach(fs => map.set(fs.id, fs));
+            return Array.from(map.values());
+          });
+        } else if (pollData.sessions) {
+          setActiveSessions(pollData.sessions);
         }
+
+        if (pollData.alerts) setAlertsList(pollData.alerts);
+        if (pollData.stats) setStats(pollData.stats);
+        if (pollData.employees) setEmployeesList(pollData.employees);
+        
+        setSelectedSessionId(currentId => {
+          if (!currentId && fetchedSessions.length > 0) {
+            return fetchedSessions[0].id;
+          }
+          return currentId;
+        });
       }
     } catch (err) {
       console.error("Failed to fetch initial admin data", err);
@@ -409,9 +422,7 @@ export default function AdminDashboard() {
           refreshStats();
         } else if (type === "session_deleted") {
           setActiveSessions(prev => prev.filter(s => s.id !== data));
-          if (selectedSessionId === data) {
-            setSelectedSessionId(null);
-          }
+          setSelectedSessionId(currentId => (currentId === data ? null : currentId));
           refreshStats();
         }
       } catch (err) {
@@ -423,7 +434,7 @@ export default function AdminDashboard() {
       clearInterval(intervalId);
       eventSource.close();
     };
-  }, [selectedSessionId]);
+  }, []);
 
   const refreshStats = () => {
     fetch("/api/admin/stats", { headers: getAdminHeaders() })
@@ -1033,24 +1044,42 @@ export default function AdminDashboard() {
                 
                 {/* Timeline activity stream */}
                 <div className="space-y-4">
-                  <h3 className="text-xs font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5 font-mono">
-                    <Clock className="w-4 h-4 text-orange-500" />
-                    Interactive Behavior Timeline
-                  </h3>
+                  <div className="flex items-center justify-between border-b border-orange-100/60 pb-2">
+                    <h3 className="text-xs font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5 font-mono">
+                      <Clock className="w-4 h-4 text-orange-500" />
+                      Interactive Behavior Timeline
+                    </h3>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-mono font-extrabold">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                      LIVE STREAM
+                    </span>
+                  </div>
+
+                  <div className="mb-2">
+                    {selectedSession.status === "Deception" ? (
+                      <span className="px-2 py-1 rounded text-[10px] font-mono font-bold bg-amber-50 text-amber-800 border border-amber-200 uppercase tracking-wide block">
+                        ⚡ ATTACKER BEHAVIOR STREAM (DECEPTION SHADOW ZONE)
+                      </span>
+                    ) : (
+                      <span className="px-2 py-1 rounded text-[10px] font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 uppercase tracking-wide block">
+                        🛡️ GENUINE EMPLOYEE BEHAVIOR STREAM (REAL PORTAL)
+                      </span>
+                    )}
+                  </div>
                   
                   <div className="space-y-3.5 max-h-[400px] overflow-y-auto pr-1">
                     {selectedSession.logs.length === 0 ? (
                       <p className="text-xs text-stone-400 font-mono">No actions recorded yet.</p>
                     ) : (
-                      selectedSession.logs.map((log) => (
+                      [...selectedSession.logs].reverse().map((log) => (
                         <div key={log.id} className="relative pl-5 border-l-2 border-orange-100 space-y-1 pb-1">
                           <div className={`absolute -left-[5px] top-1 w-2 h-2 rounded-full ${
-                            log.threatPoints >= 25 ? "bg-red-500 animate-pulse" : log.threatPoints >= 15 ? "bg-orange-500" : "bg-stone-300"
+                            log.threatPoints >= 25 ? "bg-red-500 animate-pulse" : log.threatPoints >= 15 ? "bg-orange-500" : "bg-emerald-500"
                           }`}></div>
                           
                           <div className="flex justify-between items-center text-[10px] text-stone-400">
                             <span className="font-mono">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                            <span className={`font-mono ${log.threatPoints > 0 ? "text-orange-600 font-semibold" : "text-stone-400"}`}>
+                            <span className={`font-mono ${log.threatPoints > 0 ? "text-orange-600 font-semibold" : "text-emerald-700 font-bold"}`}>
                               +{log.threatPoints} threat
                             </span>
                           </div>
