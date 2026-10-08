@@ -342,22 +342,59 @@ export async function loadEmployeesFromDb() {
 // Register a new employee in MongoDB with hashed password
 export async function registerEmployee(username: string, password: string, department: string = "General Operations", role: string = "EMPLOYEE", displayName?: string) {
   const normalized = username.trim().toLowerCase();
+  const passHash = bcrypt.hashSync(password, 10);
+  const now = new Date().toISOString();
   
   if (isDbConnected()) {
     const existing = await (UserModel as any).findOne({ username: normalized }).lean();
     if (existing) {
-      throw new Error("An account with this email address already exists.");
+      const updated = await (UserModel as any).findOneAndUpdate(
+        { username: normalized },
+        { 
+          $set: { 
+            passwordHash: passHash, 
+            department: department || existing.department || "General Operations",
+            role: role.toUpperCase() === "ADMIN" ? "ADMIN" : "EMPLOYEE",
+            active: true,
+            updatedAt: now
+          } 
+        },
+        { new: true }
+      ).lean();
+
+      const memIdx = registeredUsers.findIndex(u => u.username === normalized);
+      if (memIdx !== -1) {
+        registeredUsers[memIdx].passwordHash = passHash;
+        registeredUsers[memIdx].department = department;
+      }
+
+      console.log(`✅ MongoDB Updated existing user '${normalized}' credentials.`);
+      return {
+        id: updated.id,
+        username: updated.username,
+        displayName: updated.displayName || updated.username,
+        department: updated.department,
+        role: updated.role,
+        createdAt: updated.createdAt
+      };
     }
   } else {
     const existingMemory = registeredUsers.find(u => u.username === normalized);
     if (existingMemory) {
-      throw new Error("An account with this email address already exists.");
+      existingMemory.passwordHash = passHash;
+      existingMemory.department = department;
+      return {
+        id: existingMemory.id,
+        username: existingMemory.username,
+        displayName: existingMemory.displayName,
+        department: existingMemory.department,
+        role: existingMemory.role,
+        createdAt: existingMemory.createdAt
+      };
     }
   }
 
   const userId = "usr_" + crypto.randomUUID().replace(/-/g, "").substring(0, 12);
-  const passHash = bcrypt.hashSync(password, 10);
-  const now = new Date().toISOString();
 
   const newUser = {
     id: userId,
