@@ -46,19 +46,37 @@ const getDirname = () => {
 const __filename = getFilename();
 const __dirname = getDirname();
 
+export const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
+
+// Lazy database connection middleware for Vercel Serverless Function invocations
+let dbConnectionPromise: Promise<boolean> | null = null;
+app.use(async (req, res, next) => {
+  if (!isDbConnected() && process.env.MONGODB_URI) {
+    if (!dbConnectionPromise) {
+      dbConnectionPromise = connectMongoDB().then(async (success) => {
+        if (success) await loadEmployeesFromDb();
+        return success;
+      }).catch(err => {
+        console.error("MongoDB serverless connect error:", err);
+        return false;
+      });
+    }
+    await dbConnectionPromise;
+  }
+  next();
+});
+
+// Apply Security Headers (Helmet) without breaking Vite/React inline assets
+app.use(helmet({ contentSecurityPolicy: false }));
+
+// Middleware for parsing JSON requests
+app.use(express.json());
+
 async function startServer() {
-  // Connect to MongoDB Atlas & bootstrap initial admin
+  // Connect to MongoDB Atlas & bootstrap initial admin on standalone startup
   await connectMongoDB();
   await loadEmployeesFromDb();
-
-  const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
-
-  // Apply Security Headers (Helmet) without breaking Vite/React inline assets
-  app.use(helmet({ contentSecurityPolicy: false }));
-
-  // Middleware for parsing JSON requests
-  app.use(express.json());
 
   // Helper middleware for Admin Authorization
   const requireAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -723,9 +741,13 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Express multi-device server running on port ${PORT}`);
-  });
+  if (!process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Express multi-device server running on port ${PORT}`);
+    });
+  }
 }
 
 startServer();
+
+export default app;
