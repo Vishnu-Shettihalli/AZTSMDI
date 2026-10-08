@@ -29,17 +29,21 @@ import { generateAttackerSummary } from "./src/server/gemini.js";
 import { connectMongoDB, UserModel, SessionModel, AlertModel, isDbConnected } from "./src/server/db.js";
 
 const getFilename = () => {
-  if (typeof import.meta !== "undefined" && import.meta.url) {
-    return fileURLToPath(import.meta.url);
-  }
-  return typeof __filename !== "undefined" ? __filename : "";
+  try {
+    if (typeof import.meta !== "undefined" && import.meta && typeof import.meta.url === "string" && import.meta.url.startsWith("file:")) {
+      return fileURLToPath(import.meta.url);
+    }
+  } catch (e) {}
+  return typeof __filename !== "undefined" ? __filename : process.cwd();
 };
 
 const getDirname = () => {
-  if (typeof import.meta !== "undefined" && import.meta.url) {
-    return path.dirname(fileURLToPath(import.meta.url));
-  }
-  return typeof __dirname !== "undefined" ? __dirname : "";
+  try {
+    if (typeof import.meta !== "undefined" && import.meta && typeof import.meta.url === "string" && import.meta.url.startsWith("file:")) {
+      return path.dirname(fileURLToPath(import.meta.url));
+    }
+  } catch (e) {}
+  return typeof __dirname !== "undefined" ? __dirname : process.cwd();
 };
 
 const __filename = getFilename();
