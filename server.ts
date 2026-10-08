@@ -2,6 +2,8 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import express from "express";
+import helmet from "helmet";
+import bcrypt from "bcryptjs";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { fileURLToPath } from "url";
@@ -21,10 +23,11 @@ import {
   getRegisteredEmployees,
   registerEmployee,
   removeEmployee,
-  loadEmployeesFromDb
+  loadEmployeesFromDb,
+  registeredUsers
 } from "./src/server/store.js";
 import { generateAttackerSummary } from "./src/server/gemini.js";
-import { connectMongoDB } from "./src/server/db.js";
+import { connectMongoDB, UserModel, SessionModel, AlertModel, isDbConnected } from "./src/server/db.js";
 
 const getFilename = () => {
   if (typeof import.meta !== "undefined" && import.meta.url) {
@@ -44,71 +47,129 @@ const __filename = getFilename();
 const __dirname = getDirname();
 
 async function startServer() {
-  // Connect to MongoDB if MONGODB_URI is provided
+  // Connect to MongoDB Atlas & bootstrap initial admin
   await connectMongoDB();
   await loadEmployeesFromDb();
 
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
 
+  // Apply Security Headers (Helmet) without breaking Vite/React inline assets
+  app.use(helmet({ contentSecurityPolicy: false }));
+
   // Middleware for parsing JSON requests
   app.use(express.json());
+
+  // Helper middleware for Admin Authorization
+  const requireAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const sessionId = (req.headers["x-session-id"] as string) || 
+                      (req.headers["authorization"]?.replace("Bearer ", "")) || 
+                      (req.query.sessionId as string) || 
+                      req.body?.sessionId;
+
+    if (!sessionId) {
+      // Check for direct session in store
+      return res.status(401).json({ status: "error", message: "Authentication required." });
+    }
+
+    const session = sessions.find(s => s.id === sessionId);
+    if (session && session.username) {
+      if (session.role === "ADMIN") {
+        return next();
+      }
+      if (isDbConnected()) {
+        const dbUser = await (UserModel as any).findOne({ username: session.username.toLowerCase() }).lean();
+        if (dbUser && dbUser.role === "ADMIN") {
+          return next();
+        }
+      }
+    }
+
+    // Direct token or session validation against DB
+    if (isDbConnected()) {
+      const dbSess = await (SessionModel as any).findOne({ id: sessionId }).lean();
+      if (dbSess && dbSess.role === "ADMIN") {
+        return next();
+      }
+      if (dbSess) {
+        const dbUser = await (UserModel as any).findOne({ username: dbSess.username.toLowerCase() }).lean();
+        if (dbUser && dbUser.role === "ADMIN") {
+          return next();
+        }
+      }
+    }
+
+    return res.status(403).json({ status: "error", message: "Admin authorization required." });
+  };
 
   // ==========================================
   // AUTHENTICATION ENDPOINTS
   // ==========================================
 
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", async (req, res) => {
     const { username, password } = req.body;
-    const ip = req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "127.0.0.1";
+    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
     const userAgent = req.headers["user-agent"] || "Unknown User Agent";
 
     if (!username) {
-      return res.status(400).json({ status: "error", message: "Username is required." });
+      return res.status(400).json({ status: "error", message: "Email or username is required." });
     }
 
-    // 1. Check for genuine employee login (dynamic registered employees list)
-    const registered = getRegisteredEmployees();
-    const matchedUser = registered.find(
-      e => e.username.toLowerCase() === username.trim().toLowerCase() && e.password === password
-    );
+    const normalized = username.trim().toLowerCase();
 
-    if (matchedUser) {
-      // Successful real employee login
-      // Clear login failures
-      delete loginFailures[username];
-      const session = createSession(matchedUser.username, "Genuine", ip, userAgent);
-      return res.json({ status: "success", session });
+    // 1. Authenticate against persistent MongoDB UserModel
+    let authenticatedUser: any = null;
+
+    if (isDbConnected()) {
+      const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
+      if (dbUser && dbUser.passwordHash) {
+        if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
+          authenticatedUser = dbUser;
+        }
+      }
     }
 
-    // 2. Check for seeded trap credential
-    if (username === "admin@corporate.sec") {
-      // Seeded credentials trap immediately triggers a deception environment
-      const session = createSession(username, "Deception", ip, userAgent);
-      addLogEntry(session.id, "Trap Account Trigger", `Logged in successfully via known leaked trap account credentials: '${username}'`, 40);
-      return res.json({ status: "success", session });
+    if (!authenticatedUser) {
+      const memUser = registeredUsers.find(u => u.username === normalized && u.active);
+      if (memUser && memUser.passwordHash) {
+        if (bcrypt.compareSync(password || "", memUser.passwordHash)) {
+          authenticatedUser = memUser;
+        }
+      }
     }
 
-    // 3. Brute force / failed login track
-    const failures = loginFailures[username] || { count: 0, lastAttempt: Date.now() };
+    if (authenticatedUser) {
+      // Successful real employee authentication
+      delete loginFailures[normalized];
+      const sessionRole = authenticatedUser.role === "ADMIN" ? "ADMIN" : "USER";
+      const session = createSession(authenticatedUser.username, "Genuine", ip, userAgent, sessionRole, authenticatedUser.id);
+      return res.json({ 
+        status: "success", 
+        session,
+        role: authenticatedUser.role === "ADMIN" ? "admin" : "user"
+      });
+    }
+
+
+    // 3. Brute force / failed login threshold calculation
+    const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
     failures.count += 1;
     failures.lastAttempt = Date.now();
-    loginFailures[username] = failures;
+    loginFailures[normalized] = failures;
 
     if (failures.count >= 3) {
-      // 3rd or greater failure silently succeeds, redirecting to the Shadow Service!
-      const session = createSession(username, "Deception", ip, userAgent);
-      // Log the brute force entry
+      // 3rd failure threshold breached: silently redirect attacker to Shadow Service (Honeypot)
+      const session = createSession(normalized, "Deception", ip, userAgent, "USER");
       addLogEntry(
         session.id,
         "Brute Force Threshold Breached",
-        `Repeated failed logins (${failures.count} attempts). Silent deceptive diversion activated. Last tried password was '${password}'`,
+        `Repeated failed logins (${failures.count} attempts). Silent deceptive diversion activated.`,
         30
       );
       return res.json({ status: "success", session });
     } else {
-      // Normal failed response
-      createAlert("warning", `Failed login attempt for user '${username}' (Attempt ${failures.count}/3).`, "auth_system");
+      // Standard failed response
+      createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failures.count}/3).`, "auth_system");
       return res.status(401).json({
         status: "error",
         message: `Invalid credentials. Attempt ${failures.count} of 3.`
@@ -116,38 +177,55 @@ async function startServer() {
     }
   });
 
-  app.post("/api/auth/admin-login", (req, res) => {
+  app.post("/api/auth/admin-login", async (req, res) => {
     const { username, password } = req.body;
+    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
+    const userAgent = req.headers["user-agent"] || "Unknown User Agent";
+
     if (!username) {
       return res.status(400).json({ status: "error", message: "Admin username is required." });
     }
-    // Accept admin / admin123 or any admin attempt for demo convenience
-    if ((username.toLowerCase() === "admin" || username.toLowerCase() === "soc_admin" || username.toLowerCase() === "admin@svit.edu") && (password === "admin" || password === "admin123" || password === "password" || password === "")) {
+
+    const normalized = username.trim().toLowerCase();
+
+    // Authenticate against MongoDB Admin record
+    if (isDbConnected()) {
+      const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
+      if (dbUser && dbUser.role === "ADMIN" && dbUser.passwordHash) {
+        if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
+          const session = createSession(dbUser.username, "Genuine", ip, userAgent, "ADMIN", dbUser.id);
+          return res.json({
+            status: "success",
+            role: "admin",
+            session: {
+              id: session.id,
+              username: dbUser.displayName || dbUser.username,
+              role: "admin"
+            }
+          });
+        }
+      }
+    }
+
+    // Check if password matches env ADMIN_PASSWORD if specified
+    const envAdminUser = (process.env.ADMIN_USERNAME || "admin@svit.edu").toLowerCase();
+    const envAdminPass = process.env.ADMIN_PASSWORD || "AdminSecurePass#2026";
+    if (normalized === envAdminUser && password === envAdminPass) {
+      const session = createSession(normalized, "Genuine", ip, userAgent, "ADMIN");
       return res.json({
         status: "success",
         role: "admin",
         session: {
-          id: `admin_${Date.now()}`,
-          username: username.toLowerCase() === "admin" ? "SOC Security Lead" : username,
+          id: session.id,
+          username: "SOC Security Lead",
           role: "admin"
         }
       });
     }
-    // Allow any admin username with password 'admin123' for smooth testing
-    if (password === "admin123" || password === "admin") {
-      return res.json({
-        status: "success",
-        role: "admin",
-        session: {
-          id: `admin_${Date.now()}`,
-          username: username,
-          role: "admin"
-        }
-      });
-    }
+
     return res.status(401).json({
       status: "error",
-      message: "Invalid SOC Admin credentials. Try username: admin / password: admin123"
+      message: "Invalid SOC Admin credentials."
     });
   });
 
@@ -179,7 +257,6 @@ async function startServer() {
       return res.status(403).json({ status: "error", message: "Unauthorized access." });
     }
 
-    // Standard business dashboard data
     res.json({
       status: "success",
       data: {
@@ -211,7 +288,6 @@ async function startServer() {
   // DECEPTION DASHBOARD ENDPOINTS (SHADOW ZONE)
   // ==========================================
 
-  // Get deceptive files directory
   app.get("/api/deception/files/:sessionId", (req, res) => {
     const { sessionId } = req.params;
     const session = sessions.find(s => s.id === sessionId);
@@ -221,7 +297,6 @@ async function startServer() {
 
     addLogEntry(sessionId, "Accessed File Directory", "Queried root filesystem contents via Cloud File Explorer", 10);
 
-    // Map files hiding confidential contents for the list overview
     const list = DECEPTION_FILES.map(f => ({
       name: f.name,
       type: f.type,
@@ -232,7 +307,6 @@ async function startServer() {
     res.json({ status: "success", files: list });
   });
 
-  // Access specific deceptive file
   app.get("/api/deception/file/:sessionId/:fileName", (req, res) => {
     const { sessionId, fileName } = req.params;
     const session = sessions.find(s => s.id === sessionId);
@@ -245,7 +319,6 @@ async function startServer() {
       return res.status(404).json({ status: "error", message: "File not found." });
     }
 
-    // Determine threat points based on sensitivity
     const points = file.sensitive ? 30 : 5;
     const alertTag = file.sensitive ? "[HIGH SENSITIVITY]" : "[NORMAL]";
     addLogEntry(sessionId, `Viewed Document`, `Accessed file '${fileName}' ${alertTag}. Size: ${file.size}`, points);
@@ -253,7 +326,6 @@ async function startServer() {
     res.json({ status: "success", file });
   });
 
-  // Custom terminal simulation inside shadow zone
   app.post("/api/deception/terminal/:sessionId", (req, res) => {
     const { sessionId } = req.params;
     const { command } = req.body;
@@ -352,7 +424,6 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     res.json({ status: "success", output });
   });
 
-  // Custom generic search inside shadow environment
   app.post("/api/deception/search/:sessionId", (req, res) => {
     const { sessionId } = req.params;
     const { query } = req.body;
@@ -364,7 +435,6 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     const cleanQuery = (query || "").trim().toLowerCase();
     let points = 5;
 
-    // Search query flags
     const highThreatKeywords = ["admin", "root", "password", "key", "secret", "db", "leak", "hack", "payment", "credit"];
     const matchesKeyword = highThreatKeywords.some(keyword => cleanQuery.includes(keyword));
 
@@ -374,7 +444,6 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
 
     addLogEntry(sessionId, "Search Console Query", `Searched deception system logs for query: '${query}'`, points);
 
-    // Return fake matching assets
     const allFakeAssets = [
       { name: "production_postgres_secrets.yaml", location: "/vault/secrets/", match: "password, db, root" },
       { name: "private_ssh_key_root.pem", location: "/home/root/.ssh/", match: "key, root" },
@@ -394,7 +463,6 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     res.json({ status: "success", results });
   });
 
-  // Custom specific action click triggers
   app.post("/api/deception/action/:sessionId", (req, res) => {
     const { sessionId } = req.params;
     const { action, details, threatPoints } = req.body;
@@ -407,29 +475,27 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     res.json({ status: "success", feedback: "Operation accepted and processing in sandbox environment." });
   });
 
-
   // ==========================================
-  // ADMIN MONITORING HUB ENDPOINTS
+  // ADMIN MONITORING HUB ENDPOINTS (PROTECTED BY requireAdmin)
   // ==========================================
 
-  // Get all registered employee credentials (admin only)
-  app.get("/api/admin/employees", (req, res) => {
-    res.json({ status: "success", employees: getRegisteredEmployees() });
+  app.get("/api/admin/employees", requireAdmin, async (req, res) => {
+    const empList = await getRegisteredEmployees();
+    res.json({ status: "success", employees: empList });
   });
 
-  // Alias for backward compatibility
-  app.get("/api/admin/students", (req, res) => {
-    res.json({ status: "success", students: getRegisteredEmployees(), employees: getRegisteredEmployees() });
+  app.get("/api/admin/students", requireAdmin, async (req, res) => {
+    const empList = await getRegisteredEmployees();
+    res.json({ status: "success", students: empList, employees: empList });
   });
 
-  // Register a new employee (admin only)
-  app.post("/api/admin/employees", (req, res) => {
-    const { username, password, department, role } = req.body;
+  app.post("/api/admin/employees", requireAdmin, async (req, res) => {
+    const { username, password, department, role, displayName } = req.body;
     if (!username || !password) {
       return res.status(400).json({ status: "error", message: "Email and password are both required." });
     }
     try {
-      const employee = registerEmployee(username, password, department, role);
+      const employee = await registerEmployee(username, password, department, role, displayName);
       createAlert("info", `Admin provisioned a new employee credential for '${employee.username}' (${employee.department} - ${employee.role}).`, "admin_console");
       res.json({ status: "success", message: `Employee '${employee.username}' registered successfully.`, employee });
     } catch (err: any) {
@@ -437,106 +503,87 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     }
   });
 
-  // Remove an employee from company registry
-  app.delete("/api/admin/employees/:username", (req, res) => {
+  app.delete("/api/admin/employees/:username", requireAdmin, async (req, res) => {
     const { username } = req.params;
     try {
-      const removed = removeEmployee(username);
-      createAlert("warning", `Admin removed employee '${removed.username}' from the company registry.`, "admin_console");
-      res.json({ status: "success", message: `Employee '${removed.username}' removed successfully.`, removed });
+      const removed = await removeEmployee(username);
+      createAlert("warning", `Admin removed employee '${username}' from company registry.`, "admin_console");
+      res.json({ status: "success", message: `Employee '${username}' removed successfully.`, removed });
     } catch (err: any) {
       res.status(400).json({ status: "error", message: err.message || "Removal failed." });
     }
   });
 
-  // Alias for backward compatibility
-  app.post("/api/admin/students", (req, res) => {
-    const { username, password, department, role } = req.body;
-    if (!username || !password) {
-      return res.status(400).json({ status: "error", message: "Email and password are both required." });
+  app.get("/api/admin/sessions", requireAdmin, async (req, res) => {
+    if (isDbConnected()) {
+      const dbSessions = await (SessionModel as any).find().lean();
+      if (dbSessions && dbSessions.length > 0) {
+        const mapped = dbSessions.map((s: any) => ({
+          id: s.id || s.sessionId,
+          username: s.username,
+          ip: s.ip || "127.0.0.1",
+          userAgent: s.userAgent || "Browser",
+          loginTime: s.loginTime || new Date().toISOString(),
+          status: s.status,
+          threatScore: s.threatScore || 0,
+          failedAttempts: s.failedAttempts || 0,
+          generatingSummary: s.generatingSummary || false,
+          aiSummary: s.aiSummary,
+          logs: s.logs || []
+        }));
+        return res.json({ status: "success", sessions: mapped });
+      }
     }
-    try {
-      const employee = registerEmployee(username, password, department, role);
-      createAlert("info", `Admin provisioned a new employee credential for '${employee.username}' (${employee.department} - ${employee.role}).`, "admin_console");
-      res.json({ status: "success", message: `Employee '${employee.username}' registered successfully.`, employee });
-    } catch (err: any) {
-      res.status(400).json({ status: "error", message: err.message || "Registration failed." });
-    }
-  });
-
-  // Get active sessions
-  app.get("/api/admin/sessions", (req, res) => {
     res.json({ status: "success", sessions });
   });
 
-  // Get alert feeds
-  app.get("/api/admin/alerts", (req, res) => {
+  app.get("/api/admin/alerts", requireAdmin, async (req, res) => {
+    if (isDbConnected()) {
+      const dbAlerts = await (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean();
+      if (dbAlerts && dbAlerts.length > 0) {
+        return res.json({ status: "success", alerts: dbAlerts });
+      }
+    }
     res.json({ status: "success", alerts });
   });
 
-  // ==========================================
-  // REVERSE PROXY FORWARDING ROUTE (OPEN-SOURCE TARGET BENCHMARK PROXY)
-  // ==========================================
-  app.all("/api/proxy/*", async (req, res) => {
-    const targetPath = req.params[0] || "";
-    const sessionId = (req.headers["x-session-id"] as string) || (req.query.sessionId as string);
-    const session = sessions.find(s => s.id === sessionId);
-
-    // 1. Check Threat Score & Security Posture
-    if (session && session.status === "Deception") {
-      // SILENT HONEYPOT DIVERSION: Intercept attacker & return synthetic payload
-      addLogEntry(session.id, "Proxy Access Intercepted", `Intercepted query to '/${targetPath}'. Silently served synthetic honeypot decoy data.`, 25);
-      return res.json({
-        status: "success",
-        deceptionActive: true,
-        securityPosture: "DECEPTION_SHADOW_CONTAINMENT",
-        data: [
-          { id: 901, name: "DECOY_EXECUTIVE_PII", email: "trap_exec@svit.sec", salary: "$185,000" },
-          { id: 902, name: "TRAP_ADMIN_CREDENTIAL", email: "aws_root_trap@svit.sec", key: "AKIAIOSFODNN7EXAMPLE" }
-        ],
-        message: "Traffic containment active. Attacker served synthetic decoy response."
-      });
-    }
-
-    // 2. Legitimate User Proxy Forwarding to Open-Source Target Application API (JSONPlaceholder / HTTPBin)
-    try {
-      const targetUrl = `https://jsonplaceholder.typicode.com/${targetPath || "users"}`;
-      const response = await fetch(targetUrl);
-      const data = await response.json();
-      
-      if (session) {
-        addLogEntry(session.id, "Proxy Request Forwarded", `Forwarded legitimate request '/${targetPath}' to open-source backend web service.`, 0);
-      }
-
-      res.json({
-        status: "success",
-        deceptionActive: false,
-        securityPosture: "GENUINE_FORWARDED",
-        targetUrl,
-        data
-      });
-    } catch (err: any) {
-      res.status(500).json({ status: "error", message: "Failed to forward request to target server." });
-    }
-  });
-
-  // Get dashboard metrics stats
-  app.get("/api/admin/stats", (req, res) => {
+  app.get("/api/admin/stats", requireAdmin, (req, res) => {
     res.json({ status: "success", stats: getStats() });
   });
 
-  // Simulate an automated brute force attack on the fly
-  app.post("/api/admin/simulate/brute", (req, res) => {
+  // Production-friendly Polling endpoint for Multi-Device Admin Sync across Vercel Functions
+  app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
+    if (isDbConnected()) {
+      const dbSessions = await (SessionModel as any).find().lean();
+      const dbAlerts = await (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean();
+      const empList = await (UserModel as any).find({}, { passwordHash: 0 }).lean();
+
+      return res.json({
+        status: "success",
+        sessions: dbSessions,
+        alerts: dbAlerts,
+        employees: empList,
+        stats: getStats()
+      });
+    }
+    res.json({
+      status: "success",
+      sessions,
+      alerts,
+      employees: await getRegisteredEmployees(),
+      stats: getStats()
+    });
+  });
+
+  app.post("/api/admin/simulate/brute", requireAdmin, (req, res) => {
     const ip = "185.220.101." + Math.floor(Math.random() * 254 + 1);
     const userAgent = "Mozilla/5.0 (compatible; BotnetScanner/2.4; +http://recon.net)";
     const username = "recon_bot_" + Math.random().toString(36).substring(2, 6) + "@threat.org";
 
-    // 1. Create a deception session directly
     const session = createSession(username, "Deception", ip, userAgent);
     session.failedAttempts = 3;
 
-    // 2. Add realistic logs sequentially
-    addLogEntry(session.id, "Brute Force Threshold Breached", "Repeated failed logins (3 attempts). Silent honeypot diversion activated. Last tried password was 'admin12345'", 30);
+    addLogEntry(session.id, "Brute Force Threshold Breached", "Repeated failed logins (3 attempts). Silent honeypot diversion activated.", 30);
     
     setTimeout(() => {
       addLogEntry(session.id, "Terminal Command Execution", "Executed: 'whoami' via command interpreter", 15);
@@ -546,15 +593,10 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
       addLogEntry(session.id, "Read Document Content", "Accessed file 'customer_pii_export_raw.csv'. Format: CSV | Size: 185 KB", 30);
     }, 200);
 
-    setTimeout(() => {
-      addLogEntry(session.id, "Revealed Vault Secrets", "Triggered 'env' command in console to harvest environmental variables", 35);
-    }, 300);
-
     res.json({ status: "success", message: "Infiltration simulation triggered.", session });
   });
 
-  // Trigger simulated critical posture warnings
-  app.post("/api/admin/simulate/critical", (req, res) => {
+  app.post("/api/admin/simulate/critical", requireAdmin, (req, res) => {
     createAlert(
       "critical",
       `POSTURE ALARM: Brute-force credentials-stuffing attack detected targeting LDAP server node. Triggering automated telemetry quarantine.`,
@@ -563,8 +605,7 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     res.json({ status: "success", message: "Critical alarm injected into live feed." });
   });
 
-  // Download real-time session logs report as CSV
-  app.get("/api/admin/download-report/:sessionId", (req, res) => {
+  app.get("/api/admin/download-report/:sessionId", requireAdmin, (req, res) => {
     const { sessionId } = req.params;
     const session = sessions.find(s => s.id === sessionId);
     if (!session) {
@@ -582,8 +623,7 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     res.status(200).send(csvContent);
   });
 
-  // Generate plain English Attacker Intent Summary using Gemini / Fallback
-  app.post("/api/admin/summary/:sessionId", async (req, res) => {
+  app.post("/api/admin/summary/:sessionId", requireAdmin, async (req, res) => {
     const { sessionId } = req.params;
     const session = sessions.find(s => s.id === sessionId);
     if (!session) {
@@ -606,17 +646,14 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
     }
   });
 
-  // SSE (Server-Sent Events) Stream endpoint for real-time monitoring dashboard updates
   app.get("/api/admin/events", (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    // Store subscription
     addSseClient(res);
 
-    // Write a comment ping every 25 seconds to keep the connection alive
     const intervalId = setInterval(() => {
       res.write(": ping\n\n");
     }, 25000);
@@ -625,6 +662,47 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
       clearInterval(intervalId);
       removeSseClient(res);
     });
+  });
+
+  // Reverse Proxy Route (Synthetic Decoy Interception)
+  app.all("/api/proxy/*", async (req, res) => {
+    const targetPath = req.params[0] || "";
+    const sessionId = (req.headers["x-session-id"] as string) || (req.query.sessionId as string);
+    const session = sessions.find(s => s.id === sessionId);
+
+    if (session && session.status === "Deception") {
+      addLogEntry(session.id, "Proxy Access Intercepted", `Intercepted query to '/${targetPath}'. Silently served synthetic honeypot decoy data.`, 25);
+      return res.json({
+        status: "success",
+        deceptionActive: true,
+        securityPosture: "DECEPTION_SHADOW_CONTAINMENT",
+        data: [
+          { id: 901, name: "DECOY_EXECUTIVE_PII", email: "trap_exec@svit.sec", salary: "$185,000" },
+          { id: 902, name: "TRAP_ADMIN_CREDENTIAL", email: "aws_root_trap@svit.sec", key: "AKIAIOSFODNN7EXAMPLE" }
+        ],
+        message: "Traffic containment active. Attacker served synthetic decoy response."
+      });
+    }
+
+    try {
+      const targetUrl = `https://jsonplaceholder.typicode.com/${targetPath || "users"}`;
+      const response = await fetch(targetUrl);
+      const data = await response.json();
+      
+      if (session) {
+        addLogEntry(session.id, "Proxy Request Forwarded", `Forwarded legitimate request '/${targetPath}' to target backend.`, 0);
+      }
+
+      res.json({
+        status: "success",
+        deceptionActive: false,
+        securityPosture: "GENUINE_FORWARDED",
+        targetUrl,
+        data
+      });
+    } catch (err: any) {
+      res.status(500).json({ status: "error", message: "Failed to forward request to target server." });
+    }
   });
 
   // ==========================================
@@ -646,7 +724,7 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Express custom dev/production server running on port ${PORT}`);
+    console.log(`Express multi-device server running on port ${PORT}`);
   });
 }
 

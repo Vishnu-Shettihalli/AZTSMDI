@@ -277,33 +277,38 @@ export default function AdminDashboard() {
     printWindow.document.close();
   };
 
-  // Load Initial Datasets
+  const getAdminHeaders = () => {
+    const saved = localStorage.getItem("active_security_session");
+    let sessId = "admin_session";
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed?.id) sessId = parsed.id;
+      } catch (e) {}
+    }
+    return { "x-session-id": sessId, "Content-Type": "application/json" };
+  };
+
+  // Load Initial Datasets & Multi-Device State Sync
   const fetchAllData = async () => {
     try {
-      const [sessRes, alertRes, statRes, empRes] = await Promise.all([
-        fetch("/api/admin/sessions"),
-        fetch("/api/admin/alerts"),
-        fetch("/api/admin/stats"),
-        fetch("/api/admin/employees")
+      const headers = getAdminHeaders();
+      const [pollRes] = await Promise.all([
+        fetch("/api/admin/events-poll", { headers })
       ]);
 
-      const [sessData, alertData, statData, empData] = await Promise.all([
-        sessRes.json(),
-        alertRes.json(),
-        statRes.json(),
-        empRes.json()
-      ]);
+      const pollData = await pollRes.json();
 
-      if (sessData.status === "success") {
-        const fetchedSessions: Session[] = sessData.sessions || [];
+      if (pollData.status === "success") {
+        const fetchedSessions: Session[] = pollData.sessions || [];
         setActiveSessions(fetchedSessions);
+        setAlertsList(pollData.alerts || []);
+        setStats(pollData.stats || null);
+        setEmployeesList(pollData.employees || []);
         if (fetchedSessions.length > 0 && !selectedSessionId) {
           setSelectedSessionId(fetchedSessions[0].id);
         }
       }
-      if (alertData.status === "success") setAlertsList(alertData.alerts);
-      if (statData.status === "success") setStats(statData.stats);
-      if (empData.status === "success") setEmployeesList(empData.employees || []);
     } catch (err) {
       console.error("Failed to fetch initial admin data", err);
     } finally {
@@ -325,7 +330,7 @@ export default function AdminDashboard() {
     try {
       const res = await fetch("/api/admin/employees", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAdminHeaders(),
         body: JSON.stringify({
           username: newEmployeeEmail,
           password: newEmployeePassword,
@@ -338,12 +343,7 @@ export default function AdminDashboard() {
         setEmployeeSuccess(data.message || "Employee registered successfully!");
         setNewEmployeeEmail("");
         setNewEmployeePassword("");
-        // Refresh employees list
-        const refreshedRes = await fetch("/api/admin/employees");
-        const refreshedData = await refreshedRes.json();
-        if (refreshedData.status === "success") {
-          setEmployeesList(refreshedData.employees || []);
-        }
+        fetchAllData();
       } else {
         setEmployeeError(data.message || "Failed to register employee.");
       }
@@ -360,16 +360,13 @@ export default function AdminDashboard() {
     setEmployeeSuccess(null);
     try {
       const res = await fetch(`/api/admin/employees/${encodeURIComponent(username)}`, {
-        method: "DELETE"
+        method: "DELETE",
+        headers: getAdminHeaders()
       });
       const data = await res.json();
       if (data.status === "success") {
         setEmployeeSuccess(data.message || "Employee removed successfully.");
-        const refreshedRes = await fetch("/api/admin/employees");
-        const refreshedData = await refreshedRes.json();
-        if (refreshedData.status === "success") {
-          setEmployeesList(refreshedData.employees || []);
-        }
+        fetchAllData();
       } else {
         setEmployeeError(data.message || "Failed to remove employee.");
       }
@@ -382,10 +379,10 @@ export default function AdminDashboard() {
   useEffect(() => {
     fetchAllData();
 
-    // 2.5-second polling timer to guarantee real-time cross-device sync
+    // 2.0-second polling timer for seamless multi-device deployment sync
     const intervalId = setInterval(() => {
       fetchAllData();
-    }, 2500);
+    }, 2000);
 
     // Establish SSE Connection for instant real-time logs stream
     const eventSource = new EventSource("/api/admin/events");
@@ -429,7 +426,7 @@ export default function AdminDashboard() {
   }, [selectedSessionId]);
 
   const refreshStats = () => {
-    fetch("/api/admin/stats")
+    fetch("/api/admin/stats", { headers: getAdminHeaders() })
       .then(res => res.json())
       .then(json => { if (json.status === "success") setStats(json.stats); });
   };
@@ -438,7 +435,7 @@ export default function AdminDashboard() {
   const handleSimulateBrute = async () => {
     setSimulating(true);
     try {
-      const res = await fetch("/api/admin/simulate/brute", { method: "POST" });
+      const res = await fetch("/api/admin/simulate/brute", { method: "POST", headers: getAdminHeaders() });
       const data = await res.json();
       if (data.status === "success" && data.session) {
         setSelectedSessionId(data.session.id);
@@ -455,7 +452,7 @@ export default function AdminDashboard() {
   const handleSimulateCritical = async () => {
     setSimAlertSuccess(true);
     try {
-      await fetch("/api/admin/simulate/critical", { method: "POST" });
+      await fetch("/api/admin/simulate/critical", { method: "POST", headers: getAdminHeaders() });
       fetchAllData();
     } catch (e) {
       console.error(e);
@@ -471,13 +468,12 @@ export default function AdminDashboard() {
 
   // Request AI Attacker summary
   const handleGenerateSummary = async (sessionId: string) => {
-    // Update local state temporarily to show generating status
     setActiveSessions(prev =>
       prev.map(s => (s.id === sessionId ? { ...s, generatingSummary: true } : s))
     );
 
     try {
-      const res = await fetch(`/api/admin/summary/${sessionId}`, { method: "POST" });
+      const res = await fetch(`/api/admin/summary/${sessionId}`, { method: "POST", headers: getAdminHeaders() });
       const data = await res.json();
       if (data.status === "success") {
         setActiveSessions(prev =>

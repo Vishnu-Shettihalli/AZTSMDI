@@ -1,59 +1,48 @@
+import crypto from "crypto";
+import bcrypt from "bcryptjs";
 import { Session, LogEntry, Alert, DashboardStats } from '../types.js';
-import { EmployeeModel, SessionModel, AlertModel, isDbConnected } from './db.js';
+import { UserModel, SessionModel, AlertModel, isDbConnected } from './db.js';
 import { generateAttackerSummary } from './gemini.js';
 
-// In-memory databases (fast cache)
+// In-memory cache synced with MongoDB
 export let sessions: Session[] = [];
 export let alerts: Alert[] = [];
+export let registeredUsers: any[] = [];
 export const loginFailures: Record<string, { count: number; lastAttempt: number }> = {};
 
-// SSE connection subscribers for real-time monitoring dashboard updates
+// SSE connection subscribers
 export let sseClients: any[] = [];
 
-// Fake deception files that look highly sensitive
+// Synthetic deception research files (Decoy Assets)
 export const DECEPTION_FILES = [
   {
     name: 'q3_merger_acquisition_plan.pdf',
     type: 'pdf',
     size: '14.2 MB',
     sensitive: true,
-    content: 'CONFIDENTIAL: APEX CORP ACQUISITION STRATEGY Q3 2026. Target: CoreLogic solutions. Capital allocated: $42.5M. Strategy details: Undergoing silent stock buyback, finalizing board resolution. Authorized readers: Board of Directors only.'
+    content: 'CONFIDENTIAL SYNTHETIC DECOY: APEX CORP ACQUISITION STRATEGY Q3 2026. Target: CoreLogic solutions. Capital allocated: $42.5M. Strategy details: Undergoing silent stock buyback, finalizing board resolution. Authorized readers: Board of Directors only.'
   },
   {
     name: 'customer_pii_export_raw.csv',
     type: 'csv',
     size: '185 KB',
     sensitive: true,
-    content: 'id,first_name,last_name,email,ssn,credit_card,phone\n1,James,Mercer,j.mercer@gmail.com,***-**-3940,4111-****-****-1120,+1-555-0199\n2,Sarah,Conner,sconner@cyber.com,***-**-1029,5520-****-****-9482,+1-555-1024\n3,Bruce,Wayne,bruce@waynecorp.com,***-**-0001,4000-****-****-0001,+1-555-8888\n4,Clark,Kent,clark@dailyplanet.com,***-**-1122,4111-****-****-2233,+1-555-4433'
+    content: 'id,first_name,last_name,email,ssn,credit_card,phone\n1,James,Mercer,j.mercer@test.sec,***-**-3940,4111-****-****-1120,+1-555-0199\n2,Sarah,Conner,sconner@test.sec,***-**-1029,5520-****-****-9482,+1-555-1024\n3,Bruce,Wayne,bruce@test.sec,***-**-0001,4000-****-****-0001,+1-555-8888\n4,Clark,Kent,clark@test.sec,***-**-1122,4111-****-****-2233,+1-555-4433'
   },
   {
     name: 'infrastructure_network_map.vsd',
     type: 'vsd',
     size: '4.8 MB',
     sensitive: true,
-    content: 'INTERNAL TOPOLOGY DIAGRAM: Core Router 10.0.0.1 -> Gateway PEP Firewall 10.0.0.5 -> Deception Zone Cluster 10.0.4.0/24 (Honeypot Decoy). Target DB Replica: 10.0.4.15.'
+    content: 'SYNTHETIC TOPOLOGY DIAGRAM: Core Router 10.0.0.1 -> Gateway PEP Firewall 10.0.0.5 -> Deception Zone Cluster 10.0.4.0/24 (Honeypot Decoy). Target DB Replica: 10.0.4.15.'
   },
   {
     name: 'private_ssh_key_root.pem',
     type: 'pem',
     size: '2.1 KB',
     sensitive: true,
-    content: '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCS+3J7+... DEPLOYMENT REQUISITE: DO NOT EXPOSE ...-----END OPENSSH PRIVATE KEY-----'
+    content: '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCS+3J7+... SYNTHETIC DECOY REQUISITE: DO NOT EXPOSE ...-----END OPENSSH PRIVATE KEY-----'
   }
-];
-
-export interface RegisteredEmployee {
-  username: string;
-  password: string;
-  department: string;
-  role: string;
-  createdAt: string;
-}
-
-export let registeredEmployees: RegisteredEmployee[] = [
-  { username: "employee@svit.edu", password: "password123", department: "Information Technology", role: "Senior System Admin", createdAt: "2026-07-20" },
-  { username: "employee@company.com", password: "password123", department: "Cybersecurity Operations", role: "Security Analyst", createdAt: "2026-07-20" },
-  { username: "staff@svit.edu", password: "password123", department: "Faculty Administration", role: "Assistant Professor", createdAt: "2026-07-21" }
 ];
 
 export function addSseClient(res: any) {
@@ -75,14 +64,18 @@ export function broadcastToAdmins(type: string, data: any) {
   });
 }
 
-// Create a new security session
-export function createSession(username: string, status: 'Genuine' | 'Deception', ip: string, userAgent: string): Session {
+// Create a new security session with persistent UUID
+export function createSession(username: string, status: 'Genuine' | 'Deception', ip: string, userAgent: string, role: string = "USER", userId?: string): Session {
+  const uuid = "sess_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
+  const now = new Date().toISOString();
+  
   const session: Session = {
-    id: 'sess_' + Math.random().toString(36).substring(2, 10),
+    id: uuid,
     username,
-    ip,
-    userAgent,
-    loginTime: new Date().toISOString(),
+    role,
+    ip: ip || "127.0.0.1",
+    userAgent: userAgent || "Browser",
+    loginTime: now,
     status,
     threatScore: status === 'Deception' ? 50 : 0,
     failedAttempts: 0,
@@ -90,26 +83,41 @@ export function createSession(username: string, status: 'Genuine' | 'Deception',
     generatingSummary: false
   };
 
+  // Add to local cache array
   sessions.unshift(session);
 
-  // Sync to MongoDB asynchronously
+  // Sync to MongoDB Cloud Atlas
   if (isDbConnected()) {
-    SessionModel.create(session).catch(e => console.error("Error saving session to MongoDB:", e));
+    SessionModel.create({
+      id: session.id,
+      sessionId: session.id,
+      userId: userId || "",
+      username: session.username,
+      role: role,
+      status: session.status,
+      threatScore: session.threatScore,
+      failedAttempts: 0,
+      ip: session.ip,
+      userAgent: session.userAgent,
+      loginTime: session.loginTime,
+      lastActivityAt: now,
+      logs: []
+    }).catch(e => console.error("Error saving session to MongoDB:", e));
   }
 
   // Add initial log entry
-  addLogEntry(session.id, 'Session Initiated', `User logged in. Determined security posture: ${status}.`, status === 'Deception' ? 50 : 0);
+  addLogEntry(session.id, 'Session Initiated', `User logged in. Security classification: ${status}.`, status === 'Deception' ? 50 : 0);
 
   if (status === 'Deception') {
-    createAlert('critical', `Policy Enforcement: Silently diverted user '${username}' into Shadow Deception Zone. Reason: Suspicious activity/credentials.`, session.id);
+    createAlert('critical', `Policy Enforcement: Silently diverted traffic for '${username}' into Shadow Deception Zone.`, session.id);
   } else {
-    createAlert('info', `Legitimate session established for user '${username}'.`, session.id);
+    createAlert('info', `Legitimate user session established for '${username}'.`, session.id);
   }
 
   return session;
 }
 
-// Add a log entry for a session
+// Add telemetry log entry to a session and persist to MongoDB
 export function addLogEntry(sessionId: string, action: string, details: string, basePoints: number) {
   const session = sessions.find(s => s.id === sessionId);
   if (!session) return;
@@ -117,7 +125,7 @@ export function addLogEntry(sessionId: string, action: string, details: string, 
   const timestamp = new Date().toISOString();
   let points = basePoints;
 
-  // Rule 1: Rapid clicks detection
+  // Rule 1: Rapid clicks detection algorithm
   if (session.logs.length > 0) {
     const lastLog = session.logs[session.logs.length - 1];
     const timeDiff = new Date(timestamp).getTime() - new Date(lastLog.timestamp).getTime();
@@ -135,8 +143,9 @@ export function addLogEntry(sessionId: string, action: string, details: string, 
     createAlert('warning', `Out-of-sequence security action: Vault revealed early in session.`, session.id);
   }
 
+  const logId = "log_" + crypto.randomUUID().replace(/-/g, "").substring(0, 12);
   const log: LogEntry = {
-    id: 'log_' + Math.random().toString(36).substring(2, 10),
+    id: logId,
     timestamp,
     action,
     details,
@@ -161,12 +170,19 @@ export function addLogEntry(sessionId: string, action: string, details: string, 
     }).catch(() => {});
   }
 
-  // Sync to MongoDB
+  // Sync log & threat score update to MongoDB Cloud Atlas
   if (isDbConnected()) {
     SessionModel.updateOne(
       { id: sessionId },
-      { $set: { logs: session.logs, threatScore: session.threatScore, aiSummary: session.aiSummary } }
-    ).catch(e => console.error("Error updating session in MongoDB:", e));
+      { 
+        $set: { 
+          logs: session.logs, 
+          threatScore: session.threatScore, 
+          aiSummary: session.aiSummary,
+          lastActivityAt: timestamp
+        } 
+      }
+    ).catch(e => console.error("Error updating session telemetry in MongoDB:", e));
   }
 
   broadcastToAdmins('session_update', session);
@@ -174,8 +190,9 @@ export function addLogEntry(sessionId: string, action: string, details: string, 
 
 // Create an alert
 export function createAlert(type: 'info' | 'warning' | 'critical', message: string, sessionId: string) {
+  const alertId = "alert_" + crypto.randomUUID().replace(/-/g, "").substring(0, 12);
   const alert: Alert = {
-    id: 'alert_' + Math.random().toString(36).substring(2, 10),
+    id: alertId,
     timestamp: new Date().toISOString(),
     type,
     message,
@@ -192,11 +209,10 @@ export function createAlert(type: 'info' | 'warning' | 'critical', message: stri
   broadcastToAdmins('new_alert', alert);
 }
 
-// Clear a session
+// Terminate / end a session
 export function endSession(sessionId: string) {
   const index = sessions.findIndex(s => s.id === sessionId);
   if (index !== -1) {
-    const deletedSession = sessions[index];
     sessions.splice(index, 1);
 
     if (isDbConnected()) {
@@ -243,27 +259,15 @@ export function getStats(): DashboardStats {
   };
 }
 
-// Load registered employees, sessions, and alerts from MongoDB on server start
+// Load users, sessions, and alerts from MongoDB on server start
 export async function loadEmployeesFromDb() {
   if (isDbConnected()) {
     try {
-      // Employees
-      const docs = await EmployeeModel.find().lean();
-      if (docs && docs.length > 0) {
-        registeredEmployees = docs.map(e => ({
-          username: e.username,
-          password: e.password,
-          department: e.department,
-          role: e.role,
-          createdAt: e.createdAt
-        }));
-      }
-
-      // Sessions
-      const dbSessions = await SessionModel.find().lean();
+      // Sessions from MongoDB
+      const dbSessions = await (SessionModel as any).find().lean();
       if (dbSessions && dbSessions.length > 0) {
-        sessions = dbSessions.map(s => ({
-          id: s.id,
+        sessions = dbSessions.map((s: any) => ({
+          id: s.id || s.sessionId,
           username: s.username,
           ip: s.ip || "127.0.0.1",
           userAgent: s.userAgent || "Browser",
@@ -274,7 +278,7 @@ export async function loadEmployeesFromDb() {
           generatingSummary: false,
           aiSummary: s.aiSummary,
           logs: (s.logs || []).map((l: any) => ({
-            id: l.id || "log_" + Math.random().toString(36).substring(2, 8),
+            id: l.id || "log_" + crypto.randomUUID().replace(/-/g, "").substring(0, 8),
             timestamp: l.timestamp || new Date().toISOString(),
             action: l.action || "",
             details: l.details || "",
@@ -283,10 +287,10 @@ export async function loadEmployeesFromDb() {
         }));
       }
 
-      // Alerts
-      const dbAlerts = await AlertModel.find().lean();
+      // Alerts from MongoDB
+      const dbAlerts = await (AlertModel as any).find().lean();
       if (dbAlerts && dbAlerts.length > 0) {
-        alerts = dbAlerts.map(a => ({
+        alerts = dbAlerts.map((a: any) => ({
           id: a.id,
           timestamp: a.timestamp || new Date().toISOString(),
           type: (a.type as "info" | "warning" | "critical") || "info",
@@ -295,53 +299,96 @@ export async function loadEmployeesFromDb() {
         }));
       }
 
-      console.log(`✅ Loaded ${registeredEmployees.length} employees, ${sessions.length} sessions, and ${alerts.length} alerts from MongoDB!`);
+      const userCount = await (UserModel as any).countDocuments();
+      console.log(`✅ MongoDB Synced: Loaded ${userCount} persistent users, ${sessions.length} sessions, and ${alerts.length} alerts.`);
     } catch (e) {
-      console.error("Error loading data from MongoDB:", e);
+      console.error("Error loading state from MongoDB:", e);
     }
   }
 }
 
-export function getRegisteredEmployees() {
-  return registeredEmployees;
-}
-
-export function registerEmployee(username: string, password: string, department: string = "General Operations", role: string = "Staff Member") {
+// Register a new employee in MongoDB with hashed password
+export async function registerEmployee(username: string, password: string, department: string = "General Operations", role: string = "EMPLOYEE", displayName?: string) {
   const normalized = username.trim().toLowerCase();
-  if (registeredEmployees.some(e => e.username.toLowerCase() === normalized)) {
-    throw new Error("An employee account with this email address already exists.");
+  
+  if (isDbConnected()) {
+    const existing = await (UserModel as any).findOne({ username: normalized }).lean();
+    if (existing) {
+      throw new Error("An account with this email address already exists.");
+    }
+  } else {
+    const existingMemory = registeredUsers.find(u => u.username === normalized);
+    if (existingMemory) {
+      throw new Error("An account with this email address already exists.");
+    }
   }
-  const newEmp: RegisteredEmployee = {
+
+  const userId = "usr_" + crypto.randomUUID().replace(/-/g, "").substring(0, 12);
+  const passHash = bcrypt.hashSync(password, 10);
+  const now = new Date().toISOString();
+
+  const newUser = {
+    id: userId,
     username: normalized,
-    password,
+    passwordHash: passHash,
+    displayName: displayName || normalized.split("@")[0],
     department: department || "General Operations",
-    role: role || "Staff Member",
-    createdAt: new Date().toISOString().split("T")[0]
+    role: role.toUpperCase() === "ADMIN" ? "ADMIN" : "EMPLOYEE",
+    active: true,
+    createdAt: now,
+    updatedAt: now
   };
-  registeredEmployees.push(newEmp);
+
+  registeredUsers.push(newUser);
 
   if (isDbConnected()) {
-    EmployeeModel.create(newEmp)
-      .then(() => console.log(`✅ MongoDB Synced: Created employee '${normalized}' in cloud database.`))
-      .catch(e => console.error("Error creating employee in MongoDB:", e));
+    await (UserModel as any).create(newUser);
+    console.log(`✅ MongoDB Created user '${normalized}' (Role: ${newUser.role}).`);
   }
 
-  return newEmp;
+  return {
+    id: newUser.id,
+    username: newUser.username,
+    displayName: newUser.displayName,
+    department: newUser.department,
+    role: newUser.role,
+    createdAt: newUser.createdAt
+  };
 }
 
-export function removeEmployee(username: string) {
+// Remove an employee from MongoDB
+export async function removeEmployee(username: string) {
   const normalized = username.trim().toLowerCase();
-  const idx = registeredEmployees.findIndex(e => e.username.toLowerCase() === normalized);
-  const removedObj = idx !== -1 ? registeredEmployees[idx] : { username: normalized };
-  if (idx !== -1) {
-    registeredEmployees.splice(idx, 1);
-  }
+
+  registeredUsers = registeredUsers.filter(u => u.username !== normalized);
 
   if (isDbConnected()) {
-    EmployeeModel.deleteOne({ username: { $regex: new RegExp("^" + normalized.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') + "$", "i") } })
-      .then(res => console.log(`✅ MongoDB Synced: Deleted employee '${normalized}' (Deleted count: ${res.deletedCount})`))
-      .catch(e => console.error("Error deleting employee from MongoDB:", e));
+    const res = await (UserModel as any).deleteOne({ username: normalized });
+    console.log(`✅ MongoDB Deleted user '${normalized}' (Count: ${res.deletedCount})`);
   }
 
-  return removedObj;
+  return { username: normalized };
+}
+
+// Query all registered users from MongoDB
+export async function getRegisteredEmployees() {
+  if (isDbConnected()) {
+    const docs = await (UserModel as any).find({}, { passwordHash: 0 }).lean();
+    return docs.map((d: any) => ({
+      id: d.id,
+      username: d.username,
+      displayName: d.displayName || d.username,
+      department: d.department || "General Operations",
+      role: d.role || "EMPLOYEE",
+      createdAt: d.createdAt
+    }));
+  }
+  return registeredUsers.map(u => ({
+    id: u.id,
+    username: u.username,
+    displayName: u.displayName,
+    department: u.department,
+    role: u.role,
+    createdAt: u.createdAt
+  }));
 }

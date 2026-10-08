@@ -9,6 +9,7 @@ export interface LogEntry {
 export interface Session {
   id: string;
   username: string;
+  role?: string;
   ip: string;
   userAgent: string;
   loginTime: string;

@@ -68,18 +68,18 @@ The case study environment simulates the multi-tier cloud topology of the colleg
 
 ---
 
-## 4. Quantitative Results & Evaluation Summary
+## 4. Quantitative Results & Evaluation Summary (Illustrative Target Framework — Evaluation Pending Executable Benchmark)
 
-The proposed architecture was evaluated across **1,000 synthetic validation transactions** under simulated operational loads:
+The target architecture framework is designed for evaluation across simulated operational loads:
 
-| Metric | Target Value | Empirical Case Study Result | Status |
+| Metric | Target Value | Target Evaluation Result | Status |
 | :--- | :--- | :--- | :--- |
-| **Detection Accuracy** | > 95.0% | **98.4%** | ✅ PASSED |
-| **Precision** | > 92.0% | **96.8%** | ✅ PASSED |
-| **Recall (Sensitivity)** | > 94.0% | **97.2%** | ✅ PASSED |
-| **F1 Score** | > 93.0% | **97.0%** | ✅ PASSED |
-| **Gateway Latency Overhead** | < 10.0 ms | **+2.4 ms** (at 100 req/sec) | ✅ PASSED |
-| **Attack Containment Rate** | 100% | **100%** (0 leaks to production) | ✅ PASSED |
+| **Detection Accuracy** | > 95.0% | **98.4% (Target)** | 🟡 Illustrative / Planned Evaluation |
+| **Precision** | > 92.0% | **96.8% (Target)** | 🟡 Illustrative / Planned Evaluation |
+| **Recall (Sensitivity)** | > 94.0% | **97.2% (Target)** | 🟡 Illustrative / Planned Evaluation |
+| **F1 Score** | > 93.0% | **97.0% (Target)** | 🟡 Illustrative / Planned Evaluation |
+| **Gateway Latency Overhead** | < 10.0 ms | **+2.4 ms (Target)** | 🟡 Illustrative / Planned Evaluation |
+| **Attack Containment Rate** | 100% | **100% (Target)** | 🟡 Illustrative / Planned Evaluation |
 
 ---
 

@@ -144,7 +144,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                 {loginRole === "admin" ? "Admin Security Sign In" : "Sign In to Account"}
               </h3>
               <p className="text-xs text-slate-500 mt-1">
-                {loginRole === "admin" ? "Default Credentials: admin / admin123" : "Enter your email address and password"}
+                {loginRole === "admin" ? "Enter your Admin Credentials (e.g. admin@svit.edu)" : "Enter your email address and password"}
               </p>
             </div>
 
