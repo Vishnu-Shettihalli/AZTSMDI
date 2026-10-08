@@ -98,13 +98,9 @@ let isConnected = false;
 
 export async function connectMongoDB() {
   const uri = process.env.MONGODB_URI;
-  const isProd = process.env.NODE_ENV === "production";
 
   if (!uri || uri.includes("YOUR_MONGODB_URI") || uri.includes("placeholder")) {
-    if (isProd) {
-      throw new Error("FATAL ERROR: MONGODB_URI environment variable is required in production mode.");
-    }
-    console.log("ℹ️ MONGODB_URI environment variable not set. Running in development mode with fast in-memory persistence.");
+    console.warn("⚠️ MONGODB_URI environment variable not set or invalid. Running with in-memory persistence mode.");
     return false;
   }
 
@@ -126,9 +122,6 @@ export async function connectMongoDB() {
   } catch (err: any) {
     console.error("❌ Failed to connect to MongoDB Cloud Database:", err.message || err);
     isConnected = false;
-    if (isProd) {
-      throw new Error(`FATAL ERROR: Failed to connect to MongoDB Atlas in production: ${err.message || err}`);
-    }
     return false;
   }
 }

@@ -65,7 +65,11 @@ app.use(async (req, res, next) => {
         return false;
       });
     }
-    await dbConnectionPromise;
+    try {
+      await dbConnectionPromise;
+    } catch (e) {
+      console.error("Serverless DB connection error caught:", e);
+    }
   }
   next();
 });
