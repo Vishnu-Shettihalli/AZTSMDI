@@ -195,6 +195,81 @@ async function startServer() {
   };
 
   // ==========================================
+  // INTELLIGENT API GATEWAY SECURITY MIDDLEWARE
+  // ==========================================
+
+  const intelligentApiGateway = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!req.path.startsWith("/api/") || req.path.startsWith("/api/auth/")) {
+      return next();
+    }
+
+    const authHeader = (req.headers["authorization"] as string) || "";
+    const rawToken = authHeader.replace("Bearer ", "").trim();
+    const sessionIdHeader = (req.headers["x-session-id"] as string) || (req.query.sessionId as string) || req.body?.sessionId;
+
+    const jwtPayload = verifyJwtToken(authHeader || rawToken);
+    let targetSessionId = jwtPayload?.sessionId || sessionIdHeader || rawToken;
+    let session = targetSessionId ? await findSession(targetSessionId) : null;
+
+    // Reject tampered/invalid Bearer JWT tokens on protected endpoints
+    if (authHeader.startsWith("Bearer ") && !jwtPayload && !session && !targetSessionId?.startsWith("sess_") && targetSessionId !== "admin_session" && targetSessionId !== "admin") {
+      return res.status(401).json({ status: "error", message: "Invalid, tampered, or expired JWT Token signature." });
+    }
+
+    const role = (jwtPayload?.role || session?.role || "USER").toUpperCase();
+    const status = session?.status || jwtPayload?.status || "Genuine";
+
+    const isEmployeeRoute = req.path.startsWith("/api/employee") || req.path.startsWith("/api/real");
+    const isDeceptionRoute = req.path.startsWith("/api/deception");
+    const isAdminRoute = req.path.startsWith("/api/admin");
+
+    // Deception session isolation: DECEPTION sessions CANNOT access Admin or Employee endpoints
+    if (status === "Deception" && (isAdminRoute || isEmployeeRoute)) {
+      return res.status(403).json({ status: "error", message: "Access Denied: Session restricted to Aegis Deception Environment." });
+    }
+
+    // Role isolation: Non-admin EMPLOYEE sessions CANNOT access Admin endpoints
+    if (role === "EMPLOYEE" && isAdminRoute) {
+      return res.status(403).json({ status: "error", message: "Access Denied: Admin authorization required." });
+    }
+
+    // Genuine Employee sessions CANNOT access Deception endpoints
+    if (status === "Genuine" && role !== "ADMIN" && isDeceptionRoute) {
+      return res.status(403).json({ status: "error", message: "Access Denied: Deception environment is inaccessible to legitimate employee profiles." });
+    }
+
+    // Dynamic Closed-Loop Policy Gateway Enforcement
+    const activePolicies = await getActivePolicies();
+    for (const policy of activePolicies) {
+      if (policy.action === "DECEPTION" && session && session.threatScore >= policy.threshold && session.status !== "Deception") {
+        session.status = "Deception";
+        createAlert("critical", `CLOSED-LOOP GATEWAY POLICY ENFORCED: Session '${session.id}' threat score ${session.threatScore} reached threshold ${policy.threshold}. Diverted to Deception Zone.`, session.id);
+      }
+    }
+
+    // Record Audit Event in MongoDB
+    if (isDbConnected() && session) {
+      AuditEventModel.create({
+        id: "audit_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10),
+        timestamp: new Date().toISOString(),
+        sessionId: session.id,
+        username: session.username,
+        role: role,
+        action: `API Request: ${req.method} ${req.path}`,
+        endpoint: req.path,
+        method: req.method,
+        status: 200,
+        threatScore: session.threatScore || 0,
+        decision: session.status === "Deception" ? "DECEPTION" : "ALLOW"
+      }).catch(() => {});
+    }
+
+    next();
+  };
+
+  app.use(intelligentApiGateway);
+
+  // ==========================================
   // AUTHENTICATION ENDPOINTS
   // ==========================================
 

@@ -5,17 +5,28 @@ import { Session, LogEntry, Alert, DashboardStats, SecurityPolicy } from '../typ
 import { UserModel, SessionModel, AlertModel, LoginFailureModel, TaskModel, ProjectModel, TicketModel, PolicyModel, AuditEventModel, isDbConnected } from './db.js';
 import { generateAttackerSummary } from './gemini.js';
 
-export const JWT_SECRET = process.env.JWT_SECRET || "AZTSMDI_CLOSED_LOOP_JWT_SECRET_2026";
+export const getJwtSecret = (): string => {
+  const envSecret = process.env.JWT_SECRET;
+  if (process.env.NODE_ENV === "production") {
+    if (!envSecret || envSecret.trim() === "" || envSecret.includes("placeholder")) {
+      throw new Error("CRITICAL SERVER CONFIGURATION ERROR: JWT_SECRET environment variable is missing in production environment.");
+    }
+    return envSecret.trim();
+  }
+  return envSecret || "AZTSMDI_DEV_JWT_SECRET_LOCAL_ONLY_2026";
+};
 
 export function generateJwtToken(payload: { userId: string; username: string; role: string; sessionId: string; status: string }) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
+  const secret = getJwtSecret();
+  return jwt.sign(payload, secret, { expiresIn: '8h' });
 }
 
 export function verifyJwtToken(token: string): any {
   if (!token) return null;
   try {
     const cleanToken = token.replace("Bearer ", "").trim();
-    return jwt.verify(cleanToken, JWT_SECRET);
+    const secret = getJwtSecret();
+    return jwt.verify(cleanToken, secret);
   } catch (err) {
     return null;
   }
