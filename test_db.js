@@ -1,17 +1,28 @@
-import dns from "dns";
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
+import dotenv from "dotenv";
+dotenv.config();
+
 
 import mongoose from "mongoose";
 
-const uri = "mongodb+srv://majorproject2027svit_db_user:w6E3TkzgrR3nbjCW@cluster0.8fswwbb.mongodb.net/zerotrust_db?retryWrites=true&w=majority";
+const uri = process.env.MONGODB_URI;
 
-console.log("Testing connection with Google DNS...");
+if (!uri) {
+  console.error("FAILURE: MONGODB_URI environment variable is not defined.");
+  process.exit(1);
+}
+
+console.log("Testing connection to MongoDB Cloud Database...");
 mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 })
   .then(() => {
-    console.log("SUCCESS! Connected to MongoDB Atlas Cloud Database.");
+    console.log("SUCCESS! Connected to MongoDB Cloud Database.");
     process.exit(0);
   })
   .catch((err) => {
-    console.error("FAILURE:", err.message);
+    console.error("FAILURE CATEGORY:", err.name);
+    console.error("FAILURE DETAILS:", err.message);
+    if (err.reason) {
+      console.error("CLUSTER REASON:", err.reason);
+    }
     process.exit(1);
   });
+

@@ -1,13 +1,16 @@
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { Session, LogEntry, Alert, DashboardStats } from '../types.js';
-import { UserModel, SessionModel, AlertModel, isDbConnected } from './db.js';
+import { UserModel, SessionModel, AlertModel, TaskModel, ProjectModel, TicketModel, isDbConnected } from './db.js';
 import { generateAttackerSummary } from './gemini.js';
 
 // In-memory cache synced with MongoDB
 export let sessions: Session[] = [];
 export let alerts: Alert[] = [];
 export let registeredUsers: any[] = [];
+export let tasksCache: any[] = [];
+export let projectsCache: any[] = [];
+export let ticketsCache: any[] = [];
 export const loginFailures: Record<string, { count: number; lastAttempt: number }> = {};
 
 // SSE connection subscribers
@@ -118,8 +121,34 @@ export function createSession(username: string, status: 'Genuine' | 'Deception',
 }
 
 // Add telemetry log entry to a session and persist to MongoDB
-export function addLogEntry(sessionId: string, action: string, details: string, basePoints: number) {
-  const session = sessions.find(s => s.id === sessionId);
+export async function addLogEntry(sessionId: string, action: string, details: string, basePoints: number) {
+  let session = sessions.find(s => s.id === sessionId);
+  
+  if (!session && isDbConnected()) {
+    try {
+      const dbSess = await (SessionModel as any).findOne({ id: sessionId }).lean();
+      if (dbSess) {
+        session = {
+          id: dbSess.id || dbSess.sessionId,
+          username: dbSess.username,
+          role: dbSess.role || "USER",
+          ip: dbSess.ip || "127.0.0.1",
+          userAgent: dbSess.userAgent || "Browser",
+          loginTime: dbSess.loginTime || new Date().toISOString(),
+          status: dbSess.status,
+          threatScore: dbSess.threatScore || 0,
+          failedAttempts: dbSess.failedAttempts || 0,
+          logs: dbSess.logs || [],
+          generatingSummary: dbSess.generatingSummary || false,
+          aiSummary: dbSess.aiSummary
+        };
+        sessions.unshift(session);
+      }
+    } catch (e) {
+      console.error("Error loading session from DB in addLogEntry:", e);
+    }
+  }
+
   if (!session) return;
 
   const timestamp = new Date().toISOString();
@@ -162,11 +191,13 @@ export function addLogEntry(sessionId: string, action: string, details: string, 
   // Auto-generate AI Summary in background if session has actions
   if (!session.generatingSummary && session.logs.length >= 2) {
     generateAttackerSummary(session).then(summary => {
-      session.aiSummary = summary;
-      if (isDbConnected()) {
-        SessionModel.updateOne({ id: sessionId }, { $set: { aiSummary: summary } }).catch(() => {});
+      if (session) {
+        session.aiSummary = summary;
+        if (isDbConnected()) {
+          SessionModel.updateOne({ id: sessionId }, { $set: { aiSummary: summary } }).catch(() => {});
+        }
+        broadcastToAdmins('session_update', session);
       }
-      broadcastToAdmins('session_update', session);
     }).catch(() => {});
   }
 
@@ -392,3 +423,148 @@ export async function getRegisteredEmployees() {
     createdAt: u.createdAt
   }));
 }
+
+// ==========================================
+// REAL EMPLOYEE DATA MANAGEMENT
+// ==========================================
+
+export async function getEmployeeData(username: string) {
+  const normalized = username.trim().toLowerCase();
+  
+  let tasks: any[] = [];
+  let projects: any[] = [];
+  let tickets: any[] = [];
+
+  if (isDbConnected()) {
+    tasks = await (TaskModel as any).find({ username: normalized }).lean();
+    projects = await (ProjectModel as any).find({ username: normalized }).lean();
+    tickets = await (TicketModel as any).find({ username: normalized }).sort({ _id: -1 }).lean();
+  } else {
+    tasks = tasksCache.filter(t => t.username === normalized);
+    projects = projectsCache.filter(p => p.username === normalized);
+    tickets = ticketsCache.filter(tk => tk.username === normalized);
+  }
+
+  // Seed default initial tasks if user has none
+  if (tasks.length === 0) {
+    const initialTasks = [
+      { id: "task_101", username: normalized, title: "Review quarterly IT security compliance report", completed: true, createdAt: new Date().toISOString() },
+      { id: "task_102", username: normalized, title: "Approve server maintenance window for Rack 4", completed: false, createdAt: new Date().toISOString() },
+      { id: "task_103", username: normalized, title: "Submit annual employee performance self-appraisal", completed: false, createdAt: new Date().toISOString() },
+      { id: "task_104", username: normalized, title: "Complete mandatory zero-trust security refresher course", completed: true, createdAt: new Date().toISOString() }
+    ];
+    for (const t of initialTasks) {
+      tasksCache.push(t);
+      if (isDbConnected()) {
+        await (TaskModel as any).create(t).catch(() => {});
+      }
+    }
+    tasks = initialTasks;
+  }
+
+  // Seed default initial projects if user has none
+  if (projects.length === 0) {
+    const initialProjects = [
+      { id: "prj_901", code: "PRJ-901", name: "Campus Network Infrastructure Upgrade", schedule: "Deadline: Aug 15", status: "Active", username: normalized, createdAt: new Date().toISOString() },
+      { id: "prj_882", code: "PRJ-882", name: "Employee Directory & SSO Modernization", schedule: "Deadline: Sep 01", status: "Active", username: normalized, createdAt: new Date().toISOString() },
+      { id: "prj_750", code: "PRJ-750", name: "Institutional Data Backup & DR Sync", schedule: "Deadline: Oct 10", status: "Pending Review", username: normalized, createdAt: new Date().toISOString() }
+    ];
+    for (const p of initialProjects) {
+      projectsCache.push(p);
+      if (isDbConnected()) {
+        await (ProjectModel as any).create(p).catch(() => {});
+      }
+    }
+    projects = initialProjects;
+  }
+
+  return { tasks, projects, tickets };
+}
+
+export async function addEmployeeTask(username: string, title: string) {
+  const normalized = username.trim().toLowerCase();
+  const taskId = "task_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10);
+  const task = {
+    id: taskId,
+    username: normalized,
+    title,
+    completed: false,
+    createdAt: new Date().toISOString()
+  };
+
+  tasksCache.unshift(task);
+
+  if (isDbConnected()) {
+    await (TaskModel as any).create(task);
+  }
+
+  return task;
+}
+
+export async function toggleEmployeeTask(taskId: string, completed: boolean) {
+  const memIndex = tasksCache.findIndex(t => t.id === taskId);
+  if (memIndex !== -1) {
+    tasksCache[memIndex].completed = completed;
+  }
+
+  if (isDbConnected()) {
+    await (TaskModel as any).updateOne({ id: taskId }, { $set: { completed } });
+  }
+
+  return { id: taskId, completed };
+}
+
+export async function deleteEmployeeTask(taskId: string) {
+  tasksCache = tasksCache.filter(t => t.id !== taskId);
+
+  if (isDbConnected()) {
+    await (TaskModel as any).deleteOne({ id: taskId });
+  }
+
+  return { id: taskId };
+}
+
+export async function addEmployeeProject(username: string, code: string, name: string, schedule: string) {
+  const normalized = username.trim().toLowerCase();
+  const prjId = "prj_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10);
+  const prj = {
+    id: prjId,
+    code,
+    name,
+    schedule: schedule || "TBD",
+    status: "Active",
+    username: normalized,
+    createdAt: new Date().toISOString()
+  };
+
+  projectsCache.push(prj);
+
+  if (isDbConnected()) {
+    await (ProjectModel as any).create(prj);
+  }
+
+  return prj;
+}
+
+export async function addEmployeeTicket(username: string, category: string, text: string) {
+  const normalized = username.trim().toLowerCase();
+  const ticketId = "req_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10);
+  const ticket = {
+    id: ticketId,
+    username: normalized,
+    category,
+    text,
+    status: "Open",
+    createdAt: new Date().toISOString(),
+    date: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  };
+
+  ticketsCache.unshift(ticket);
+
+  if (isDbConnected()) {
+    await (TicketModel as any).create(ticket);
+  }
+
+  return ticket;
+}
+

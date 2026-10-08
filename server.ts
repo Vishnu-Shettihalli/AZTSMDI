@@ -23,10 +23,16 @@ import {
   registerEmployee,
   removeEmployee,
   loadEmployeesFromDb,
-  registeredUsers
+  registeredUsers,
+  getEmployeeData,
+  addEmployeeTask,
+  toggleEmployeeTask,
+  deleteEmployeeTask,
+  addEmployeeProject,
+  addEmployeeTicket
 } from "./src/server/store.js";
 import { generateAttackerSummary } from "./src/server/gemini.js";
-import { connectMongoDB, UserModel, SessionModel, AlertModel, isDbConnected } from "./src/server/db.js";
+import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, isDbConnected } from "./src/server/db.js";
 
 const getFilename = () => {
   try {
@@ -66,9 +72,13 @@ app.use(async (req, res, next) => {
       });
     }
     try {
-      await dbConnectionPromise;
+      const ok = await dbConnectionPromise;
+      if (!ok) {
+        dbConnectionPromise = null;
+      }
     } catch (e) {
       console.error("Serverless DB connection error caught:", e);
+      dbConnectionPromise = null;
     }
   }
   next();
@@ -79,6 +89,41 @@ app.use(helmet({ contentSecurityPolicy: false }));
 
 // Middleware for parsing JSON requests
 app.use(express.json());
+
+// Helper function to find a session across serverless function instances & memory cache
+export async function findSession(sessionId: string): Promise<any> {
+  if (!sessionId) return null;
+  let session = sessions.find(s => s.id === sessionId);
+  if (session) return session;
+
+  if (isDbConnected()) {
+    try {
+      const dbSess = await (SessionModel as any).findOne({ id: sessionId }).lean();
+      if (dbSess) {
+        const formattedSession: any = {
+          id: dbSess.id || dbSess.sessionId,
+          username: dbSess.username,
+          role: dbSess.role || "USER",
+          ip: dbSess.ip || "127.0.0.1",
+          userAgent: dbSess.userAgent || "Browser",
+          loginTime: dbSess.loginTime || new Date().toISOString(),
+          status: dbSess.status,
+          threatScore: dbSess.threatScore || 0,
+          failedAttempts: dbSess.failedAttempts || 0,
+          logs: dbSess.logs || [],
+          generatingSummary: dbSess.generatingSummary || false,
+          aiSummary: dbSess.aiSummary
+        };
+        sessions.unshift(formattedSession);
+        return formattedSession;
+      }
+    } catch (e) {
+      console.error("Error fetching session from DB:", e);
+    }
+  }
+
+  return null;
+}
 
 async function startServer() {
   // Connect to MongoDB Atlas & bootstrap initial admin on standalone startup
@@ -93,11 +138,10 @@ async function startServer() {
                       req.body?.sessionId;
 
     if (!sessionId) {
-      // Check for direct session in store
       return res.status(401).json({ status: "error", message: "Authentication required." });
     }
 
-    const session = sessions.find(s => s.id === sessionId);
+    const session = await findSession(sessionId);
     if (session && session.username) {
       if (session.role === "ADMIN") {
         return next();
@@ -166,6 +210,9 @@ async function startServer() {
     if (authenticatedUser) {
       // Successful real employee authentication
       delete loginFailures[normalized];
+      if (isDbConnected()) {
+        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+      }
       const sessionRole = authenticatedUser.role === "ADMIN" ? "ADMIN" : "USER";
       const session = createSession(authenticatedUser.username, "Genuine", ip, userAgent, sessionRole, authenticatedUser.id);
       return res.json({ 
@@ -175,29 +222,54 @@ async function startServer() {
       });
     }
 
-
     // 3. Brute force / failed login threshold calculation
-    const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
-    failures.count += 1;
-    failures.lastAttempt = Date.now();
-    loginFailures[normalized] = failures;
+    let failCount = 0;
+    if (isDbConnected()) {
+      try {
+        const existing = await (LoginFailureModel as any).findOne({ username: normalized }).lean();
+        failCount = existing ? (existing.count || 0) + 1 : 1;
+        await (LoginFailureModel as any).updateOne(
+          { username: normalized },
+          { $set: { count: failCount, lastAttempt: new Date().toISOString() } },
+          { upsert: true }
+        );
+      } catch (err) {
+        console.error("Error tracking login failure in DB:", err);
+        const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
+        failures.count += 1;
+        failures.lastAttempt = Date.now();
+        loginFailures[normalized] = failures;
+        failCount = failures.count;
+      }
+    } else {
+      const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
+      failures.count += 1;
+      failures.lastAttempt = Date.now();
+      loginFailures[normalized] = failures;
+      failCount = failures.count;
+    }
 
-    if (failures.count >= 3) {
+    if (failCount >= 3) {
       // 3rd failure threshold breached: silently redirect attacker to Shadow Service (Honeypot)
+      if (isDbConnected()) {
+        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+      }
+      delete loginFailures[normalized];
+
       const session = createSession(normalized, "Deception", ip, userAgent, "USER");
-      addLogEntry(
+      await addLogEntry(
         session.id,
         "Brute Force Threshold Breached",
-        `Repeated failed logins (${failures.count} attempts). Silent deceptive diversion activated.`,
+        `Repeated failed logins (${failCount} attempts). Silent deceptive diversion activated.`,
         30
       );
       return res.json({ status: "success", session });
     } else {
       // Standard failed response
-      createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failures.count}/3).`, "auth_system");
+      createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failCount}/3).`, "auth_system");
       return res.status(401).json({
         status: "error",
-        message: `Invalid credentials. Attempt ${failures.count} of 3.`
+        message: `Invalid credentials. Attempt ${failCount} of 3.`
       });
     }
   });
@@ -275,12 +347,18 @@ async function startServer() {
   // REAL DASHBOARD DATA (LEGITIMATE USERS)
   // ==========================================
 
-  app.get("/api/real/dashboard/:sessionId", (req, res) => {
+  // ==========================================
+  // REAL DASHBOARD DATA (LEGITIMATE USERS)
+  // ==========================================
+
+  app.get("/api/real/dashboard/:sessionId", async (req, res) => {
     const { sessionId } = req.params;
-    const session = sessions.find(s => s.id === sessionId);
+    const session = await findSession(sessionId);
     if (!session || session.status !== "Genuine") {
       return res.status(403).json({ status: "error", message: "Unauthorized access." });
     }
+
+    const empData = await getEmployeeData(session.username);
 
     res.json({
       status: "success",
@@ -291,22 +369,95 @@ async function startServer() {
           threatLevel: "Low / Normal",
           endpoints: "42/42 Secured"
         },
-        projects: [
-          { id: 1, name: "Intranet Refresh V2", deadline: "2026-08-15", status: "In Progress", lead: "Alex R." },
-          { id: 2, name: "Standard OS Security Patching", deadline: "2026-07-28", status: "Active", lead: "Nora S." },
-          { id: 3, name: "Hardware Server Upgrade (Rack 4)", deadline: "2026-09-01", status: "Pending approval", lead: "John D." }
-        ],
-        tasks: [
-          { id: 101, title: "Review standard firewall port mappings", completed: true },
-          { id: 102, title: "Submit Q2 department hardware expenses", completed: false },
-          { id: 103, title: "Update company workstation anti-virus lists", completed: true }
-        ],
-        news: [
-          { date: "2026-07-19", text: "Standard quarterly system maintenance is scheduled for Sunday July 26th, from 01:00 to 04:00 UTC." },
-          { date: "2026-07-15", text: "HR reminder: Please complete the yearly security awareness training questionnaire before Friday." }
-        ]
+        projects: empData.projects,
+        tasks: empData.tasks,
+        tickets: empData.tickets
       }
     });
+  });
+
+  app.post("/api/employee/tasks", async (req, res) => {
+    const { sessionId, title } = req.body;
+    if (!title || !sessionId) {
+      return res.status(400).json({ status: "error", message: "Task title and session ID are required." });
+    }
+    const session = await findSession(sessionId);
+    if (!session || session.status !== "Genuine") {
+      return res.status(403).json({ status: "error", message: "Unauthorized access." });
+    }
+
+    const task = await addEmployeeTask(session.username, title.trim());
+    await addLogEntry(session.id, "Task Created", `Employee created task: '${task.title}'`, 0);
+    res.json({ status: "success", task });
+  });
+
+  app.patch("/api/employee/tasks/:taskId", async (req, res) => {
+    const { taskId } = req.params;
+    const { sessionId, completed } = req.body;
+    if (!sessionId) {
+      return res.status(400).json({ status: "error", message: "Session ID is required." });
+    }
+    const session = await findSession(sessionId);
+    if (!session || session.status !== "Genuine") {
+      return res.status(403).json({ status: "error", message: "Unauthorized access." });
+    }
+
+    const updated = await toggleEmployeeTask(taskId, Boolean(completed));
+    await addLogEntry(
+      session.id,
+      "Task Status Updated",
+      `Employee marked task '${taskId}' as ${completed ? "completed" : "pending"}`,
+      0
+    );
+    res.json({ status: "success", task: updated });
+  });
+
+  app.delete("/api/employee/tasks/:taskId", async (req, res) => {
+    const { taskId } = req.params;
+    const { sessionId } = req.body;
+    const reqSessionId = sessionId || (req.headers["x-session-id"] as string);
+    if (!reqSessionId) {
+      return res.status(400).json({ status: "error", message: "Session ID is required." });
+    }
+    const session = await findSession(reqSessionId);
+    if (!session || session.status !== "Genuine") {
+      return res.status(403).json({ status: "error", message: "Unauthorized access." });
+    }
+
+    await deleteEmployeeTask(taskId);
+    await addLogEntry(session.id, "Task Removed", `Employee deleted task ID '${taskId}'`, 0);
+    res.json({ status: "success" });
+  });
+
+  app.post("/api/employee/projects", async (req, res) => {
+    const { sessionId, code, name, schedule } = req.body;
+    if (!code || !name || !sessionId) {
+      return res.status(400).json({ status: "error", message: "Project details are required." });
+    }
+    const session = await findSession(sessionId);
+    if (!session || session.status !== "Genuine") {
+      return res.status(403).json({ status: "error", message: "Unauthorized access." });
+    }
+
+    const project = await addEmployeeProject(session.username, code, name, schedule);
+    await addLogEntry(session.id, "Project Initiative Created", `Employee created project initiative '${code}: ${name}'`, 0);
+    res.json({ status: "success", project });
+  });
+
+  app.post("/api/employee/tickets", async (req, res) => {
+    const { sessionId, category, text } = req.body;
+    if (!text || !sessionId) {
+      return res.status(400).json({ status: "error", message: "Ticket content and session ID are required." });
+    }
+    const session = await findSession(sessionId);
+    if (!session || session.status !== "Genuine") {
+      return res.status(403).json({ status: "error", message: "Unauthorized access." });
+    }
+
+    const ticket = await addEmployeeTicket(session.username, category || "IT Support", text);
+    await addLogEntry(session.id, "IT Support Ticket Submitted", `Employee submitted ticket [${ticket.category}]: '${ticket.text.substring(0, 50)}'`, 0);
+    createAlert("info", `Employee '${session.username}' submitted IT ticket: [${ticket.category}] ${ticket.text.substring(0, 40)}`, session.id);
+    res.json({ status: "success", ticket });
   });
 
   // ==========================================

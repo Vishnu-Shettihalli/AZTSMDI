@@ -10,7 +10,7 @@ export default function App() {
   const [userRole, setUserRole] = useState<"admin" | "user" | null>(null);
   const [session, setSession] = useState<any>(null);
 
-  // Restore session from localStorage if present
+  // Restore & validate session from server on load
   useEffect(() => {
     const savedSession = localStorage.getItem("active_security_session");
     const savedRole = localStorage.getItem("active_security_role") as "admin" | "user" | null;
@@ -18,8 +18,29 @@ export default function App() {
     if (savedSession) {
       try {
         const parsed = JSON.parse(savedSession);
-        setSession(parsed);
-        setUserRole(savedRole || (parsed.role === "admin" ? "admin" : "user"));
+        if (parsed?.id) {
+          fetch(`/api/session/${parsed.id}`)
+            .then((res) => res.json())
+            .then((data) => {
+              if (data.status === "success" && data.session) {
+                setSession(data.session);
+                setUserRole(savedRole || (data.session.role === "ADMIN" ? "admin" : "user"));
+                localStorage.setItem("active_security_session", JSON.stringify(data.session));
+              } else if (savedRole === "admin") {
+                setSession(parsed);
+                setUserRole("admin");
+              } else {
+                setSession(null);
+                setUserRole(null);
+                localStorage.removeItem("active_security_session");
+                localStorage.removeItem("active_security_role");
+              }
+            })
+            .catch(() => {
+              setSession(parsed);
+              setUserRole(savedRole || (parsed.role === "admin" ? "admin" : "user"));
+            });
+        }
       } catch (e) {
         localStorage.removeItem("active_security_session");
         localStorage.removeItem("active_security_role");

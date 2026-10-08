@@ -62,8 +62,11 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
       try {
         const res = await fetch(`/api/real/dashboard/${session.id}`);
         const json = await res.json();
-        if (json.status === "success") {
+        if (json.status === "success" && json.data) {
           setData(json.data);
+          if (json.data.tasks) setTasks(json.data.tasks);
+          if (json.data.projects) setProjects(json.data.projects);
+          if (json.data.tickets) setSubmittedFeedbacks(json.data.tickets);
         }
       } catch (err) {
         console.error("Failed to load real dashboard data", err);
@@ -74,61 +77,107 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
     fetchRealData();
   }, [session.id]);
 
-  const handleToggleTask = (taskId: number) => {
+  const handleToggleTask = async (taskId: any, currentCompleted: boolean) => {
+    const nextState = !currentCompleted;
     setTasks(prev => 
-      prev.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t)
+      prev.map(t => t.id === taskId ? { ...t, completed: nextState } : t)
     );
+
+    try {
+      await fetch(`/api/employee/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, completed: nextState })
+      });
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const handleAddTask = (e: React.FormEvent) => {
+  const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTaskTitle.trim()) return;
-    const newTask = {
-      id: Date.now(),
-      title: newTaskTitle.trim(),
-      completed: false
-    };
-    setTasks(prev => [newTask, ...prev]);
+    const title = newTaskTitle.trim();
     setNewTaskTitle("");
+
+    try {
+      const res = await fetch("/api/employee/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, title })
+      });
+      const json = await res.json();
+      if (json.status === "success" && json.task) {
+        setTasks(prev => [json.task, ...prev]);
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const handleDeleteTask = (id: number) => {
+  const handleDeleteTask = async (id: any) => {
     setTasks(prev => prev.filter(t => t.id !== id));
+
+    try {
+      await fetch(`/api/employee/tasks/${id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id })
+      });
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const handleAddProject = (e: React.FormEvent) => {
+  const handleAddProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!addProjectCode || !addProjectName) return;
-    const newPrj = {
-      code: addProjectCode.toUpperCase(),
-      name: addProjectName,
-      schedule: addProjectSchedule || "TBD",
-      status: "Active"
-    };
-    setProjects(prev => [...prev, newPrj]);
+    const code = addProjectCode.toUpperCase();
+    const name = addProjectName;
+    const schedule = addProjectSchedule || "TBD";
+
     setAddProjectCode("");
     setAddProjectName("");
     setAddProjectSchedule("");
     setShowAddProject(false);
+
+    try {
+      const res = await fetch("/api/employee/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, code, name, schedule })
+      });
+      const json = await res.json();
+      if (json.status === "success" && json.project) {
+        setProjects(prev => [...prev, json.project]);
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const handleFeedbackSubmit = (e: React.FormEvent) => {
+  const handleFeedbackSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!feedbackText.trim()) return;
-    
-    const newFeedback = {
-      id: "req_" + Math.random().toString(36).substring(2, 8),
-      category: feedbackCategory,
-      text: feedbackText.trim(),
-      date: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-
-    setSubmittedFeedbacks(prev => [newFeedback, ...prev]);
+    const category = feedbackCategory;
+    const text = feedbackText.trim();
     setFeedbackText("");
-    setShowFeedbackToast(true);
-    setTimeout(() => {
-      setShowFeedbackToast(false);
-    }, 3000);
+
+    try {
+      const res = await fetch("/api/employee/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, category, text })
+      });
+      const json = await res.json();
+      if (json.status === "success" && json.ticket) {
+        setSubmittedFeedbacks(prev => [json.ticket, ...prev]);
+        setShowFeedbackToast(true);
+        setTimeout(() => setShowFeedbackToast(false), 3000);
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   if (loading) {
@@ -363,7 +412,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
                   <input
                     type="checkbox"
                     checked={task.completed}
-                    onChange={() => handleToggleTask(task.id)}
+                    onChange={() => handleToggleTask(task.id, task.completed)}
                     className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500/20 w-4 h-4 cursor-pointer bg-white"
                   />
                   <span className={`text-xs ${task.completed ? "line-through text-slate-400" : "text-slate-700 font-medium"}`}>

@@ -42,6 +42,12 @@ export interface IAlert {
   sessionId?: string;
 }
 
+export interface ILoginFailure {
+  username: string;
+  count: number;
+  lastAttempt: string;
+}
+
 // Mongoose Schemas
 const userSchema = new mongoose.Schema<IUser>({
   id: { type: String, required: true, unique: true },
@@ -80,6 +86,60 @@ const sessionSchema = new mongoose.Schema<ISession>({
   }]
 });
 
+export interface ITask {
+  id: string;
+  username: string;
+  title: string;
+  completed: boolean;
+  createdAt: string;
+}
+
+export interface IProject {
+  id: string;
+  code: string;
+  name: string;
+  schedule: string;
+  status: string;
+  username: string;
+  createdAt: string;
+}
+
+export interface ITicket {
+  id: string;
+  username: string;
+  category: string;
+  text: string;
+  status: string;
+  createdAt: string;
+}
+
+const taskSchema = new mongoose.Schema<ITask>({
+  id: { type: String, required: true, unique: true },
+  username: { type: String, required: true, lowercase: true, trim: true },
+  title: { type: String, required: true },
+  completed: { type: Boolean, default: false },
+  createdAt: { type: String, default: () => new Date().toISOString() }
+});
+
+const projectSchema = new mongoose.Schema<IProject>({
+  id: { type: String, required: true, unique: true },
+  code: { type: String, required: true },
+  name: { type: String, required: true },
+  schedule: { type: String, default: "TBD" },
+  status: { type: String, default: "Active" },
+  username: { type: String, required: true, lowercase: true, trim: true },
+  createdAt: { type: String, default: () => new Date().toISOString() }
+});
+
+const ticketSchema = new mongoose.Schema<ITicket>({
+  id: { type: String, required: true, unique: true },
+  username: { type: String, required: true, lowercase: true, trim: true },
+  category: { type: String, required: true },
+  text: { type: String, required: true },
+  status: { type: String, default: "Open" },
+  createdAt: { type: String, default: () => new Date().toISOString() }
+});
+
 const alertSchema = new mongoose.Schema<IAlert>({
   id: { type: String, required: true, unique: true },
   timestamp: { type: String, default: () => new Date().toISOString() },
@@ -88,11 +148,21 @@ const alertSchema = new mongoose.Schema<IAlert>({
   sessionId: { type: String }
 });
 
+const loginFailureSchema = new mongoose.Schema<ILoginFailure>({
+  username: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  count: { type: Number, default: 0 },
+  lastAttempt: { type: String, default: () => new Date().toISOString() }
+});
+
 export const UserModel = mongoose.models.User || mongoose.model<IUser>("User", userSchema);
 
 export const EmployeeModel = UserModel;
 export const SessionModel = mongoose.models.Session || mongoose.model<ISession>("Session", sessionSchema);
 export const AlertModel = mongoose.models.Alert || mongoose.model<IAlert>("Alert", alertSchema);
+export const LoginFailureModel = mongoose.models.LoginFailure || mongoose.model<ILoginFailure>("LoginFailure", loginFailureSchema);
+export const TaskModel = mongoose.models.Task || mongoose.model<ITask>("Task", taskSchema);
+export const ProjectModel = mongoose.models.Project || mongoose.model<IProject>("Project", projectSchema);
+export const TicketModel = mongoose.models.Ticket || mongoose.model<ITicket>("Ticket", ticketSchema);
 
 let isConnected = false;
 
