@@ -68,10 +68,13 @@ let dbConnectionPromise: Promise<boolean> | null = null;
 app.use(async (req, res, next) => {
   if (!isDbConnected() && process.env.MONGODB_URI) {
     if (!dbConnectionPromise) {
-      dbConnectionPromise = connectMongoDB().then(async (success) => {
-        if (success) await loadEmployeesFromDb();
-        return success;
-      }).catch(err => {
+      dbConnectionPromise = Promise.race([
+        connectMongoDB().then(async (success) => {
+          if (success) loadEmployeesFromDb().catch(() => {});
+          return success;
+        }),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 4500))
+      ]).catch(err => {
         console.error("MongoDB serverless connect error:", err);
         return false;
       });
@@ -274,189 +277,203 @@ async function startServer() {
   // ==========================================
 
   app.post("/api/auth/login", async (req, res) => {
-    const { username, password } = req.body;
-    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
-    const userAgent = req.headers["user-agent"] || "Unknown User Agent";
+    try {
+      const { username, password } = req.body;
+      const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
+      const userAgent = req.headers["user-agent"] || "Unknown User Agent";
 
-    if (!username) {
-      return res.status(400).json({ status: "error", message: "Email or username is required." });
-    }
-
-    const normalized = username.trim().toLowerCase();
-    const cleanPassword = (password || "").trim();
-
-    // 1. Authenticate against persistent MongoDB UserModel
-    let authenticatedUser: any = null;
-
-    if (isDbConnected()) {
-      const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
-      if (dbUser && dbUser.passwordHash) {
-        if (bcrypt.compareSync(cleanPassword, dbUser.passwordHash) || bcrypt.compareSync(password || "", dbUser.passwordHash)) {
-          authenticatedUser = dbUser;
-        }
+      if (!username) {
+        return res.status(400).json({ status: "error", message: "Email or username is required." });
       }
-    }
 
-    if (!authenticatedUser) {
-      const memUser = registeredUsers.find(u => u.username === normalized && u.active);
-      if (memUser && memUser.passwordHash) {
-        if (bcrypt.compareSync(cleanPassword, memUser.passwordHash) || bcrypt.compareSync(password || "", memUser.passwordHash)) {
-          authenticatedUser = memUser;
-        }
-      }
-    }
+      const normalized = username.trim().toLowerCase();
+      const cleanPassword = (password || "").trim();
 
-    if (authenticatedUser) {
-      // Successful real employee authentication
-      delete loginFailures[normalized];
+      // 1. Authenticate against persistent MongoDB UserModel
+      let authenticatedUser: any = null;
+
       if (isDbConnected()) {
-        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+        try {
+          const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
+          if (dbUser && dbUser.passwordHash) {
+            if (bcrypt.compareSync(cleanPassword, dbUser.passwordHash) || bcrypt.compareSync(password || "", dbUser.passwordHash)) {
+              authenticatedUser = dbUser;
+            }
+          }
+        } catch (e) {}
       }
-      const sessionRole = authenticatedUser.role === "ADMIN" ? "ADMIN" : "USER";
-      const session = createSession(authenticatedUser.username, "Genuine", ip, userAgent, sessionRole, authenticatedUser.id);
-      const token = generateJwtToken({
-        userId: authenticatedUser.id || session.id,
-        username: authenticatedUser.username,
-        role: sessionRole,
-        sessionId: session.id,
-        status: "Genuine"
-      });
-      return res.json({ 
-        status: "success", 
-        token,
-        session,
-        role: authenticatedUser.role === "ADMIN" ? "admin" : "user"
-      });
-    }
 
-    // 3. Brute force / failed login threshold calculation
-    let failCount = 0;
-    if (isDbConnected()) {
-      try {
-        const existing = await (LoginFailureModel as any).findOne({ username: normalized }).lean();
-        failCount = existing ? (existing.count || 0) + 1 : 1;
-        await (LoginFailureModel as any).updateOne(
-          { username: normalized },
-          { $set: { count: failCount, lastAttempt: new Date().toISOString() } },
-          { upsert: true }
-        );
-      } catch (err) {
-        console.error("Error tracking login failure in DB:", err);
+      if (!authenticatedUser) {
+        const memUser = registeredUsers.find(u => u.username === normalized && u.active);
+        if (memUser && memUser.passwordHash) {
+          if (bcrypt.compareSync(cleanPassword, memUser.passwordHash) || bcrypt.compareSync(password || "", memUser.passwordHash)) {
+            authenticatedUser = memUser;
+          }
+        }
+      }
+
+      if (authenticatedUser) {
+        // Successful real employee authentication
+        delete loginFailures[normalized];
+        if (isDbConnected()) {
+          await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+        }
+        const sessionRole = authenticatedUser.role === "ADMIN" ? "ADMIN" : "USER";
+        const session = createSession(authenticatedUser.username, "Genuine", ip, userAgent, sessionRole, authenticatedUser.id);
+        const token = generateJwtToken({
+          userId: authenticatedUser.id || session.id,
+          username: authenticatedUser.username,
+          role: sessionRole,
+          sessionId: session.id,
+          status: "Genuine"
+        });
+        return res.json({ 
+          status: "success", 
+          token,
+          session,
+          role: authenticatedUser.role === "ADMIN" ? "admin" : "user"
+        });
+      }
+
+      // 3. Brute force / failed login threshold calculation
+      let failCount = 0;
+      if (isDbConnected()) {
+        try {
+          const existing = await (LoginFailureModel as any).findOne({ username: normalized }).lean();
+          failCount = existing ? (existing.count || 0) + 1 : 1;
+          await (LoginFailureModel as any).updateOne(
+            { username: normalized },
+            { $set: { count: failCount, lastAttempt: new Date().toISOString() } },
+            { upsert: true }
+          );
+        } catch (err) {
+          console.error("Error tracking login failure in DB:", err);
+          const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
+          failures.count += 1;
+          failures.lastAttempt = Date.now();
+          loginFailures[normalized] = failures;
+          failCount = failures.count;
+        }
+      } else {
         const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
         failures.count += 1;
         failures.lastAttempt = Date.now();
         loginFailures[normalized] = failures;
         failCount = failures.count;
       }
-    } else {
-      const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
-      failures.count += 1;
-      failures.lastAttempt = Date.now();
-      loginFailures[normalized] = failures;
-      failCount = failures.count;
-    }
 
-    if (failCount >= 3) {
-      // 3rd failure threshold breached: silently redirect attacker to Shadow Service (Honeypot)
-      if (isDbConnected()) {
-        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+      if (failCount >= 3) {
+        // 3rd failure threshold breached: silently redirect attacker to Shadow Service (Honeypot)
+        if (isDbConnected()) {
+          await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+        }
+        delete loginFailures[normalized];
+
+        const session = createSession(normalized, "Deception", ip, userAgent, "USER");
+        const token = generateJwtToken({
+          userId: session.id,
+          username: normalized,
+          role: "USER",
+          sessionId: session.id,
+          status: "Deception"
+        });
+        await addLogEntry(
+          session.id,
+          "Brute Force Threshold Breached",
+          `Repeated failed logins (${failCount} attempts). Silent deceptive diversion activated.`,
+          30
+        );
+        return res.json({ status: "success", token, session });
+      } else {
+        // Standard failed response
+        createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failCount}/3).`, "auth_system");
+        return res.status(401).json({
+          status: "error",
+          message: `Invalid credentials. Attempt ${failCount} of 3.`
+        });
       }
-      delete loginFailures[normalized];
-
-      const session = createSession(normalized, "Deception", ip, userAgent, "USER");
-      const token = generateJwtToken({
-        userId: session.id,
-        username: normalized,
-        role: "USER",
-        sessionId: session.id,
-        status: "Deception"
-      });
-      await addLogEntry(
-        session.id,
-        "Brute Force Threshold Breached",
-        `Repeated failed logins (${failCount} attempts). Silent deceptive diversion activated.`,
-        30
-      );
-      return res.json({ status: "success", token, session });
-    } else {
-      // Standard failed response
-      createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failCount}/3).`, "auth_system");
-      return res.status(401).json({
-        status: "error",
-        message: `Invalid credentials. Attempt ${failCount} of 3.`
-      });
+    } catch (err: any) {
+      console.error("Critical error in employee login:", err);
+      return res.status(500).json({ status: "error", message: err.message || "Internal authentication error." });
     }
   });
 
   app.post("/api/auth/admin-login", async (req, res) => {
-    const { username, password } = req.body;
-    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
-    const userAgent = req.headers["user-agent"] || "Unknown User Agent";
+    try {
+      const { username, password } = req.body;
+      const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
+      const userAgent = req.headers["user-agent"] || "Unknown User Agent";
 
-    if (!username) {
-      return res.status(400).json({ status: "error", message: "Admin username is required." });
-    }
-
-    const normalized = username.trim().toLowerCase();
-
-    // Authenticate against MongoDB Admin record
-    if (isDbConnected()) {
-      const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
-      if (dbUser && dbUser.role === "ADMIN" && dbUser.passwordHash) {
-        if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
-          const session = createSession(dbUser.username, "Genuine", ip, userAgent, "ADMIN", dbUser.id);
-          const token = generateJwtToken({
-            userId: dbUser.id || session.id,
-            username: dbUser.username,
-            role: "ADMIN",
-            sessionId: session.id,
-            status: "Genuine"
-          });
-          return res.json({
-            status: "success",
-            token,
-            role: "admin",
-            session: {
-              id: session.id,
-              username: dbUser.displayName || dbUser.username,
-              role: "admin"
-            }
-          });
-        }
+      if (!username) {
+        return res.status(400).json({ status: "error", message: "Admin username is required." });
       }
-    }
 
-    // Check if password matches env ADMIN_PASSWORD or default admin credentials
-    const envAdminUser = (process.env.ADMIN_USERNAME || "admin@svit.edu").toLowerCase();
-    const envAdminPass = process.env.ADMIN_PASSWORD || "AdminSecurePass#2026";
-    const isAdminUserMatch = normalized === envAdminUser || normalized === "admin" || normalized === "admin@svit.edu";
-    const isAdminPassMatch = password === envAdminPass || password === "admin123" || password === "admin" || password === "AdminSecurePass#2026";
+      const normalized = username.trim().toLowerCase();
 
-    if (isAdminUserMatch && isAdminPassMatch) {
-      const session = createSession(normalized, "Genuine", ip, userAgent, "ADMIN");
-      const token = generateJwtToken({
-        userId: session.id,
-        username: normalized,
-        role: "ADMIN",
-        sessionId: session.id,
-        status: "Genuine"
+      // Authenticate against MongoDB Admin record
+      if (isDbConnected()) {
+        try {
+          const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
+          if (dbUser && dbUser.role === "ADMIN" && dbUser.passwordHash) {
+            if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
+              const session = createSession(dbUser.username, "Genuine", ip, userAgent, "ADMIN", dbUser.id);
+              const token = generateJwtToken({
+                userId: dbUser.id || session.id,
+                username: dbUser.username,
+                role: "ADMIN",
+                sessionId: session.id,
+                status: "Genuine"
+              });
+              return res.json({
+                status: "success",
+                token,
+                role: "admin",
+                session: {
+                  id: session.id,
+                  username: dbUser.displayName || dbUser.username,
+                  role: "admin"
+                }
+              });
+            }
+          }
+        } catch (e) {}
+      }
+
+      // Check if password matches env ADMIN_PASSWORD or default admin credentials
+      const envAdminUser = (process.env.ADMIN_USERNAME || "admin@svit.edu").toLowerCase();
+      const envAdminPass = process.env.ADMIN_PASSWORD || "AdminSecurePass#2026";
+      const isAdminUserMatch = normalized === envAdminUser || normalized === "admin" || normalized === "admin@svit.edu";
+      const isAdminPassMatch = password === envAdminPass || password === "admin123" || password === "admin" || password === "AdminSecurePass#2026";
+
+      if (isAdminUserMatch && isAdminPassMatch) {
+        const session = createSession(normalized, "Genuine", ip, userAgent, "ADMIN");
+        const token = generateJwtToken({
+          userId: session.id,
+          username: normalized,
+          role: "ADMIN",
+          sessionId: session.id,
+          status: "Genuine"
+        });
+        return res.json({
+          status: "success",
+          token,
+          role: "admin",
+          session: {
+            id: session.id,
+            username: "SOC Security Lead",
+            role: "ADMIN"
+          }
+        });
+      }
+
+      return res.status(401).json({
+        status: "error",
+        message: "Invalid SOC Admin credentials."
       });
-      return res.json({
-        status: "success",
-        token,
-        role: "admin",
-        session: {
-          id: session.id,
-          username: "SOC Security Lead",
-          role: "ADMIN"
-        }
-      });
+    } catch (err: any) {
+      console.error("Critical error in admin-login:", err);
+      return res.status(500).json({ status: "error", message: err.message || "Internal authentication error." });
     }
-
-    return res.status(401).json({
-      status: "error",
-      message: "Invalid SOC Admin credentials."
-    });
   });
 
   app.post("/api/auth/logout", (req, res) => {

@@ -248,11 +248,11 @@ export async function connectMongoDB() {
   console.log("⏳ Connecting to MongoDB Cloud Database...");
 
   try {
-    await mongoose.connect(uri, { serverSelectionTimeoutMS: 8000 });
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 4000, connectTimeoutMS: 4000 });
     isConnected = true;
     console.log("✅ Successfully connected to MongoDB Cloud Database!");
 
-    await bootstrapInitialAdmin();
+    bootstrapInitialAdmin().catch(() => {});
 
     return true;
   } catch (err: any) {

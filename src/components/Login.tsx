@@ -26,25 +26,38 @@ export default function Login({ onLoginSuccess }: LoginProps) {
 
     const endpoint = loginRole === "admin" ? "/api/auth/admin-login" : "/api/auth/login";
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     try {
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: username.trim(), password })
+        body: JSON.stringify({ username: username.trim(), password }),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
 
       const data = await res.json();
 
       if (!res.ok) {
         setError(data.message || "Credential verification failed. Please check your credentials.");
       } else if (data.status === "success") {
+        if (data.token) {
+          localStorage.setItem("jwt_token", data.token);
+        }
         const assignedRole = loginRole === "admin" || data.role === "admin" ? "admin" : "user";
         onLoginSuccess(data.session, assignedRole);
       } else {
         setError("Invalid gateway response. Please try again.");
       }
     } catch (err: any) {
-      setError("Server connection error. Please verify the backend is running.");
+      clearTimeout(timeoutId);
+      if (err.name === "AbortError") {
+        setError("Gateway authentication request timed out (8s). Please retry or verify server connectivity.");
+      } else {
+        setError("Server connection error. Please verify the backend service is reachable.");
+      }
     } finally {
       setLoading(false);
     }
