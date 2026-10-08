@@ -837,7 +837,7 @@ export default function AdminDashboard() {
                 ) : (
                   employeesList.map((emp, idx) => {
                     const genuineSession = activeSessions.find(
-                      (s) => s.username.toLowerCase() === emp.username.toLowerCase() && s.status === "Real"
+                      (s) => s.username.toLowerCase() === emp.username.toLowerCase() && (s.status === "Genuine" || s.status === "Real")
                     );
                     const deceptionSession = activeSessions.find(
                       (s) => s.username.toLowerCase() === emp.username.toLowerCase() && s.status === "Deception"
@@ -868,7 +868,7 @@ export default function AdminDashboard() {
                               </span>
                             )}
                             <span className="font-mono text-[10px] bg-emerald-50 border border-emerald-200 text-emerald-800 px-1.5 py-0.5 rounded font-semibold">
-                              Pass: {emp.password}
+                              Pass: {emp.password || "Set (Encrypted)"}
                             </span>
                             <button
                               type="button"

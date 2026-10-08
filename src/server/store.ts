@@ -257,20 +257,21 @@ export function endSession(sessionId: string) {
 }
 
 // Aggregate Dashboard metrics
-export function getStats(): DashboardStats {
-  const totalSessions = sessions.length;
-  const activeGenuine = sessions.filter(s => s.status === 'Genuine').length;
-  const activeDeception = sessions.filter(s => s.status === 'Deception').length;
+export function getStats(sessionList?: Session[]): DashboardStats {
+  const targetSessions = sessionList || sessions;
+  const totalSessions = targetSessions.length;
+  const activeGenuine = targetSessions.filter(s => String(s.status).toLowerCase() === 'genuine').length;
+  const activeDeception = targetSessions.filter(s => String(s.status).toLowerCase() === 'deception').length;
   
-  const totalThreat = sessions.reduce((acc, s) => acc + s.threatScore, 0);
+  const totalThreat = targetSessions.reduce((acc, s) => acc + (s.threatScore || 0), 0);
   const avgThreatScore = totalSessions > 0 ? Math.round(totalThreat / totalSessions) : 0;
 
   // Resource access frequency counting
   const resourceCounts: Record<string, number> = {};
-  sessions.forEach(s => {
-    s.logs.forEach(l => {
-      if (l.action.includes('Viewed Document') || l.action.includes('Reveal Vault Secrets') || l.action.includes('Terminal Command')) {
-        const key = l.action + ' - ' + l.details.split('.')[0];
+  targetSessions.forEach(s => {
+    (s.logs || []).forEach(l => {
+      if (l.action && (l.action.includes('Viewed Document') || l.action.includes('Reveal Vault Secrets') || l.action.includes('Terminal Command') || l.action.includes('Task') || l.action.includes('Ticket') || l.action.includes('Initiated'))) {
+        const key = l.action + ' - ' + (l.details ? l.details.split('.')[0] : '');
         resourceCounts[key] = (resourceCounts[key] || 0) + 1;
       }
     });

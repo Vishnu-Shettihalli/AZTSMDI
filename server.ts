@@ -742,24 +742,55 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
   // Production-friendly Polling endpoint for Multi-Device Admin Sync across Vercel Functions
   app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
     if (isDbConnected()) {
-      const dbSessions = await (SessionModel as any).find().lean();
-      const dbAlerts = await (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean();
-      const empList = await (UserModel as any).find({}, { passwordHash: 0 }).lean();
+      try {
+        const dbSessions = await (SessionModel as any).find().sort({ _id: -1 }).lean();
+        const dbAlerts = await (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean();
+        const empList = await (UserModel as any).find({}, { passwordHash: 0 }).lean();
 
-      return res.json({
-        status: "success",
-        sessions: dbSessions,
-        alerts: dbAlerts,
-        employees: empList,
-        stats: getStats()
-      });
+        if (dbSessions && dbSessions.length > 0) {
+          const mappedSessions = dbSessions.map((s: any) => ({
+            id: s.id || s.sessionId,
+            username: s.username,
+            role: s.role || "USER",
+            ip: s.ip || "127.0.0.1",
+            userAgent: s.userAgent || "Browser",
+            loginTime: s.loginTime || new Date().toISOString(),
+            status: s.status,
+            threatScore: s.threatScore || 0,
+            failedAttempts: s.failedAttempts || 0,
+            generatingSummary: s.generatingSummary || false,
+            aiSummary: s.aiSummary,
+            logs: s.logs || []
+          }));
+
+          // Sync in-memory cache with DB sessions
+          mappedSessions.forEach((ms: any) => {
+            const idx = sessions.findIndex(s => s.id === ms.id);
+            if (idx === -1) {
+              sessions.unshift(ms);
+            } else {
+              sessions[idx] = ms;
+            }
+          });
+        }
+
+        return res.json({
+          status: "success",
+          sessions: sessions,
+          alerts: dbAlerts.length > 0 ? dbAlerts : alerts,
+          employees: empList,
+          stats: getStats(sessions)
+        });
+      } catch (err) {
+        console.error("Error in events-poll:", err);
+      }
     }
     res.json({
       status: "success",
       sessions,
       alerts,
       employees: await getRegisteredEmployees(),
-      stats: getStats()
+      stats: getStats(sessions)
     });
   });
 
