@@ -29,10 +29,15 @@ import {
   toggleEmployeeTask,
   deleteEmployeeTask,
   addEmployeeProject,
-  addEmployeeTicket
+  addEmployeeTicket,
+  generateJwtToken,
+  verifyJwtToken,
+  getAllPolicies,
+  getActivePolicies,
+  deployNewPolicy
 } from "./src/server/store.js";
 import { generateAttackerSummary } from "./src/server/gemini.js";
-import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, isDbConnected } from "./src/server/db.js";
+import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, PolicyModel, AuditEventModel, isDbConnected } from "./src/server/db.js";
 
 const getFilename = () => {
   try {
@@ -203,6 +208,7 @@ async function startServer() {
     }
 
     const normalized = username.trim().toLowerCase();
+    const cleanPassword = (password || "").trim();
 
     // 1. Authenticate against persistent MongoDB UserModel
     let authenticatedUser: any = null;
@@ -210,7 +216,7 @@ async function startServer() {
     if (isDbConnected()) {
       const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
       if (dbUser && dbUser.passwordHash) {
-        if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
+        if (bcrypt.compareSync(cleanPassword, dbUser.passwordHash) || bcrypt.compareSync(password || "", dbUser.passwordHash)) {
           authenticatedUser = dbUser;
         }
       }
@@ -219,7 +225,7 @@ async function startServer() {
     if (!authenticatedUser) {
       const memUser = registeredUsers.find(u => u.username === normalized && u.active);
       if (memUser && memUser.passwordHash) {
-        if (bcrypt.compareSync(password || "", memUser.passwordHash)) {
+        if (bcrypt.compareSync(cleanPassword, memUser.passwordHash) || bcrypt.compareSync(password || "", memUser.passwordHash)) {
           authenticatedUser = memUser;
         }
       }
@@ -233,8 +239,16 @@ async function startServer() {
       }
       const sessionRole = authenticatedUser.role === "ADMIN" ? "ADMIN" : "USER";
       const session = createSession(authenticatedUser.username, "Genuine", ip, userAgent, sessionRole, authenticatedUser.id);
+      const token = generateJwtToken({
+        userId: authenticatedUser.id || session.id,
+        username: authenticatedUser.username,
+        role: sessionRole,
+        sessionId: session.id,
+        status: "Genuine"
+      });
       return res.json({ 
         status: "success", 
+        token,
         session,
         role: authenticatedUser.role === "ADMIN" ? "admin" : "user"
       });
@@ -275,13 +289,20 @@ async function startServer() {
       delete loginFailures[normalized];
 
       const session = createSession(normalized, "Deception", ip, userAgent, "USER");
+      const token = generateJwtToken({
+        userId: session.id,
+        username: normalized,
+        role: "USER",
+        sessionId: session.id,
+        status: "Deception"
+      });
       await addLogEntry(
         session.id,
         "Brute Force Threshold Breached",
         `Repeated failed logins (${failCount} attempts). Silent deceptive diversion activated.`,
         30
       );
-      return res.json({ status: "success", session });
+      return res.json({ status: "success", token, session });
     } else {
       // Standard failed response
       createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failCount}/3).`, "auth_system");
@@ -309,8 +330,16 @@ async function startServer() {
       if (dbUser && dbUser.role === "ADMIN" && dbUser.passwordHash) {
         if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
           const session = createSession(dbUser.username, "Genuine", ip, userAgent, "ADMIN", dbUser.id);
+          const token = generateJwtToken({
+            userId: dbUser.id || session.id,
+            username: dbUser.username,
+            role: "ADMIN",
+            sessionId: session.id,
+            status: "Genuine"
+          });
           return res.json({
             status: "success",
+            token,
             role: "admin",
             session: {
               id: session.id,
@@ -330,8 +359,16 @@ async function startServer() {
 
     if (isAdminUserMatch && isAdminPassMatch) {
       const session = createSession(normalized, "Genuine", ip, userAgent, "ADMIN");
+      const token = generateJwtToken({
+        userId: session.id,
+        username: normalized,
+        role: "ADMIN",
+        sessionId: session.id,
+        status: "Genuine"
+      });
       return res.json({
         status: "success",
+        token,
         role: "admin",
         session: {
           id: session.id,
@@ -783,24 +820,86 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
           });
         }
 
+        const allPols = await getAllPolicies();
+
         return res.json({
           status: "success",
           sessions: sessions,
           alerts: dbAlerts.length > 0 ? dbAlerts : alerts,
           employees: empList,
+          policies: allPols,
           stats: getStats(sessions)
         });
       } catch (err) {
         console.error("Error in events-poll:", err);
       }
     }
+    const allPols = await getAllPolicies();
     res.json({
       status: "success",
       sessions,
       alerts,
       employees: await getRegisteredEmployees(),
+      policies: allPols,
       stats: getStats(sessions)
     });
+  });
+
+  // ==========================================
+  // CLOSED-LOOP SECURITY POLICY ENDPOINTS
+  // ==========================================
+
+  app.get("/api/admin/policies", requireAdmin, async (req, res) => {
+    const pols = await getAllPolicies();
+    res.json({ status: "success", policies: pols });
+  });
+
+  app.post("/api/admin/policies/deploy", requireAdmin, async (req, res) => {
+    const { title, trigger, condition, action, threshold, scope, priority, version, sourceEvent } = req.body;
+    if (!title || !action) {
+      return res.status(400).json({ status: "error", message: "Policy title and enforcement action are required." });
+    }
+
+    try {
+      const deployed = await deployNewPolicy({
+        title,
+        trigger: trigger || "Observed Intrusion Behavior",
+        condition: condition || "threatScore >= threshold",
+        action: action || "DECEPTION",
+        threshold: threshold || 50,
+        scope: scope || "GATEWAY_ENFORCEMENT",
+        priority: priority || 1,
+        version: version || 1,
+        sourceEvent: sourceEvent || "AI_ATTACK_ANALYSIS"
+      });
+
+      res.json({ status: "success", message: `Policy '${deployed.title}' (${deployed.policyId}) deployed successfully to API Gateway!`, policy: deployed });
+    } catch (err: any) {
+      res.status(400).json({ status: "error", message: err.message || "Policy deployment failed." });
+    }
+  });
+
+  app.patch("/api/admin/policies/:policyId/toggle", requireAdmin, async (req, res) => {
+    const { policyId } = req.params;
+    const { status } = req.body;
+    const newStatus = status === "ACTIVE" ? "ACTIVE" : "INACTIVE";
+
+    if (isDbConnected()) {
+      await (PolicyModel as any).updateOne({ policyId }, { $set: { status: newStatus } }).catch(() => {});
+    }
+
+    createAlert("info", `Admin toggled Security Policy [${policyId}] status to ${newStatus}.`, "admin_policy_engine");
+    res.json({ status: "success", policyId, policyStatus: newStatus });
+  });
+
+  app.get("/api/admin/audit-events", requireAdmin, async (req, res) => {
+    if (isDbConnected()) {
+      const dbAudits = await (AuditEventModel as any).find().sort({ _id: -1 }).limit(100).lean();
+      if (dbAudits && dbAudits.length > 0) {
+        return res.json({ status: "success", auditEvents: dbAudits });
+      }
+    }
+    res.json({ status: "success", auditEvents: [] });
   });
 
   app.post("/api/admin/simulate/brute", requireAdmin, (req, res) => {

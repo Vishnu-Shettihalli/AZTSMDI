@@ -24,7 +24,7 @@ import {
   Printer
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { Session, Alert, DashboardStats } from "../types.js";
+import { Session, Alert, DashboardStats, SecurityPolicy } from "../types.js";
 
 // A simple, bulletproof Markdown-to-HTML parser for rendering the Gemini AI intent report
 function renderMarkdown(markdown: string) {
@@ -163,6 +163,11 @@ export default function AdminDashboard() {
   const [employeeError, setEmployeeError] = useState<string | null>(null);
   const [employeeSuccess, setEmployeeSuccess] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
+
+  // Closed-loop Dynamic Security Policies state
+  const [securityPolicies, setSecurityPolicies] = useState<SecurityPolicy[]>([]);
+  const [deployingPolicy, setDeployingPolicy] = useState(false);
+  const [deploySuccess, setDeploySuccess] = useState<string | null>(null);
 
   // MongoDB Historical Session Search & Filter state
   const [sessionSearch, setSessionSearch] = useState("");
@@ -314,6 +319,7 @@ export default function AdminDashboard() {
         if (pollData.alerts) setAlertsList(pollData.alerts);
         if (pollData.stats) setStats(pollData.stats);
         if (pollData.employees) setEmployeesList(pollData.employees);
+        if (pollData.policies) setSecurityPolicies(pollData.policies);
         
         setSelectedSessionId(currentId => {
           if (!currentId && fetchedSessions.length > 0) {
@@ -326,6 +332,42 @@ export default function AdminDashboard() {
       console.error("Failed to fetch initial admin data", err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDeployPolicy = async (policy: Partial<SecurityPolicy>) => {
+    setDeployingPolicy(true);
+    setDeploySuccess(null);
+    try {
+      const res = await fetch("/api/admin/policies/deploy", {
+        method: "POST",
+        headers: getAdminHeaders(),
+        body: JSON.stringify(policy)
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        setDeploySuccess(`Deployed policy '${data.policy?.title || ''}' (${data.policy?.policyId || ''}) to API Gateway!`);
+        fetchAllData();
+      }
+    } catch (e) {
+      console.error("Policy deploy error:", e);
+    } finally {
+      setDeployingPolicy(false);
+      setTimeout(() => setDeploySuccess(null), 4000);
+    }
+  };
+
+  const handleTogglePolicyStatus = async (policyId: string, currentStatus: string) => {
+    const nextStatus = currentStatus === "ACTIVE" ? "INACTIVE" : "ACTIVE";
+    try {
+      await fetch(`/api/admin/policies/${policyId}/toggle`, {
+        method: "PATCH",
+        headers: getAdminHeaders(),
+        body: JSON.stringify({ status: nextStatus })
+      });
+      fetchAllData();
+    } catch (e) {
+      console.error("Policy toggle error:", e);
     }
   };
 
@@ -354,6 +396,15 @@ export default function AdminDashboard() {
       const data = await res.json();
       if (data.status === "success") {
         setEmployeeSuccess(data.message || "Employee registered successfully!");
+        if (data.employee) {
+          setEmployeesList(prev => {
+            const exists = prev.some(e => e.username.toLowerCase() === data.employee.username.toLowerCase());
+            if (exists) {
+              return prev.map(e => e.username.toLowerCase() === data.employee.username.toLowerCase() ? data.employee : e);
+            }
+            return [data.employee, ...prev];
+          });
+        }
         setNewEmployeeEmail("");
         setNewEmployeePassword("");
         fetchAllData();
@@ -947,29 +998,102 @@ export default function AdminDashboard() {
             </div>
           </div>
 
-          {/* Deception Policies & Security Governance Card */}
+          {/* Closed-Loop Security Policy Engine & Gateway Deployment Center */}
           <div className="bg-[#fffdfb] border border-orange-100 rounded-2xl p-5 space-y-3 shadow-sm">
-            <h2 className="font-bold text-sm text-stone-900 flex items-center gap-2 border-b border-orange-100/60 pb-2">
-              <ShieldCheck className="w-4 h-4 text-orange-500" />
-              Deception Policies & Security Governance
-            </h2>
-            <p className="text-[11px] text-stone-500 leading-relaxed">
-              Security policies are maintained in SOC Admin so intruders remain unaware they have been diverted into a deceptive environment:
-            </p>
-            <div className="space-y-2 text-xs">
-              <div className="p-2.5 bg-[#fbf9f5] border border-orange-100/50 rounded-xl space-y-0.5">
-                <span className="font-bold text-stone-800 block text-[11px]">1. Silent Deceptive Isolation Policy</span>
-                <span className="text-[10px] text-stone-500 block">Unregistered login credentials automatically divert traffic to the Aegis Deception Environment without returning error codes.</span>
-              </div>
-              <div className="p-2.5 bg-[#fbf9f5] border border-orange-100/50 rounded-xl space-y-0.5">
-                <span className="font-bold text-stone-800 block text-[11px]">2. Zero-Trust Telemetry Tracking</span>
-                <span className="text-[10px] text-stone-500 block">Every command run, file downloaded, or secret viewed calculates real-time threat scores and streams alerts to the SOC.</span>
-              </div>
-              <div className="p-2.5 bg-[#fbf9f5] border border-orange-100/50 rounded-xl space-y-0.5">
-                <span className="font-bold text-stone-800 block text-[11px]">3. Threat Threshold Containment</span>
-                <span className="text-[10px] text-stone-500 block">Threat scores above 75 trigger automatic session quarantine and generate Gemini AI cognitive intent reports.</span>
-              </div>
+            <div className="flex justify-between items-center border-b border-orange-100/60 pb-2">
+              <h2 className="font-bold text-sm text-stone-900 flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-orange-500" />
+                Closed-Loop Gateway Policy Engine
+              </h2>
+              <span className="text-[10px] bg-[#fbf9f5] border border-orange-100/60 px-2 py-0.5 rounded font-mono text-orange-600 font-bold">
+                {securityPolicies.filter(p => p.status === "ACTIVE").length} Active Gateway Rules
+              </span>
             </div>
+
+            <p className="text-[11px] text-stone-500 leading-relaxed">
+              Dynamically generated security policies deployed back to the <strong>Intelligent API Gateway Layer</strong> for continuous closed-loop threat mitigation.
+            </p>
+
+            {deploySuccess && (
+              <div className="p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-mono rounded-lg flex items-center gap-1.5 animate-pulse">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>{deploySuccess}</span>
+              </div>
+            )}
+
+            <div className="space-y-2.5 max-h-[260px] overflow-y-auto pr-1">
+              {securityPolicies.length === 0 ? (
+                <p className="text-xs text-stone-400 font-mono text-center py-3">No gateway policies registered yet.</p>
+              ) : (
+                securityPolicies.map((pol) => (
+                  <div key={pol.id || pol.policyId} className="p-3 bg-[#fbf9f5] border border-orange-100/60 rounded-xl space-y-1.5 shadow-2xs">
+                    <div className="flex justify-between items-center gap-2">
+                      <span className="font-mono text-[10px] font-bold text-stone-800 bg-orange-100/60 px-1.5 py-0.5 rounded">
+                        {pol.policyId}
+                      </span>
+                      <span className={`text-[9px] font-extrabold font-mono px-2 py-0.5 rounded-full border ${
+                        pol.status === "ACTIVE" 
+                          ? "bg-emerald-100 text-emerald-800 border-emerald-300" 
+                          : "bg-stone-100 text-stone-600 border-stone-300"
+                      }`}>
+                        {pol.status}
+                      </span>
+                    </div>
+
+                    <div className="font-bold text-xs text-stone-900 leading-snug">
+                      {pol.title}
+                    </div>
+
+                    <div className="flex justify-between items-center text-[10px] text-stone-500 font-mono pt-1 border-t border-orange-100/40">
+                      <span>Action: <strong className="text-orange-600">{pol.action}</strong></span>
+                      <span>Thresh: <strong className="text-stone-800">{pol.threshold}</strong></span>
+                    </div>
+
+                    <div className="flex justify-between items-center pt-1">
+                      <button
+                        onClick={() => handleTogglePolicyStatus(pol.policyId, pol.status)}
+                        className="text-[10px] text-stone-500 hover:text-stone-800 font-mono underline cursor-pointer"
+                      >
+                        Toggle {pol.status === "ACTIVE" ? "Deactivate" : "Activate"}
+                      </button>
+
+                      <button
+                        onClick={() => handleDeployPolicy(pol)}
+                        disabled={deployingPolicy}
+                        className="text-[10px] bg-orange-500 hover:bg-orange-600 text-white font-mono px-2 py-0.5 rounded cursor-pointer transition-all active:scale-95 disabled:opacity-50"
+                      >
+                        Re-deploy to Gateway
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <button
+              onClick={() => handleDeployPolicy({
+                title: "Adaptive Rate Penalty & Decoy Quarantine Policy",
+                trigger: "Observed Suspicious Exploration Activity",
+                condition: "threatScore >= 45",
+                action: "DECEPTION",
+                threshold: 45,
+                scope: "GATEWAY_ENFORCEMENT",
+                priority: 1,
+                version: (securityPolicies.length + 1)
+              })}
+              disabled={deployingPolicy}
+              className="w-full py-2 bg-[#fffdfb] hover:bg-orange-50 text-orange-600 border border-orange-200 font-bold font-mono text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-95 disabled:opacity-50"
+            >
+              {deployingPolicy ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Deploying Policy to Gateway...
+                </>
+              ) : (
+                <>
+                  <Zap className="w-3.5 h-3.5 text-orange-500" /> Deploy New Policy to Gateway Engine
+                </>
+              )}
+            </button>
           </div>
         </div>
 

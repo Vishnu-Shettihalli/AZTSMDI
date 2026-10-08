@@ -1,8 +1,25 @@
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
-import { Session, LogEntry, Alert, DashboardStats } from '../types.js';
-import { UserModel, SessionModel, AlertModel, TaskModel, ProjectModel, TicketModel, isDbConnected } from './db.js';
+import jwt from "jsonwebtoken";
+import { Session, LogEntry, Alert, DashboardStats, SecurityPolicy } from '../types.js';
+import { UserModel, SessionModel, AlertModel, LoginFailureModel, TaskModel, ProjectModel, TicketModel, PolicyModel, AuditEventModel, isDbConnected } from './db.js';
 import { generateAttackerSummary } from './gemini.js';
+
+export const JWT_SECRET = process.env.JWT_SECRET || "AZTSMDI_CLOSED_LOOP_JWT_SECRET_2026";
+
+export function generateJwtToken(payload: { userId: string; username: string; role: string; sessionId: string; status: string }) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
+}
+
+export function verifyJwtToken(token: string): any {
+  if (!token) return null;
+  try {
+    const cleanToken = token.replace("Bearer ", "").trim();
+    return jwt.verify(cleanToken, JWT_SECRET);
+  } catch (err) {
+    return null;
+  }
+}
 
 // In-memory cache synced with MongoDB
 export let sessions: Session[] = [];
@@ -11,6 +28,7 @@ export let registeredUsers: any[] = [];
 export let tasksCache: any[] = [];
 export let projectsCache: any[] = [];
 export let ticketsCache: any[] = [];
+export let policiesCache: any[] = [];
 export const loginFailures: Record<string, { count: number; lastAttempt: number }> = {};
 
 // SSE connection subscribers
@@ -295,6 +313,22 @@ export function getStats(sessionList?: Session[]): DashboardStats {
 export async function loadEmployeesFromDb() {
   if (isDbConnected()) {
     try {
+      // Users from MongoDB
+      const dbUsers = await (UserModel as any).find().lean();
+      if (dbUsers && dbUsers.length > 0) {
+        registeredUsers = dbUsers.map((u: any) => ({
+          id: u.id || u._id,
+          username: u.username,
+          passwordHash: u.passwordHash,
+          displayName: u.displayName || u.username,
+          department: u.department || "General Operations",
+          role: u.role || "EMPLOYEE",
+          active: u.active !== false,
+          createdAt: u.createdAt || new Date().toISOString(),
+          updatedAt: u.updatedAt || new Date().toISOString()
+        }));
+      }
+
       // Sessions from MongoDB
       const dbSessions = await (SessionModel as any).find().lean();
       if (dbSessions && dbSessions.length > 0) {
@@ -332,19 +366,29 @@ export async function loadEmployeesFromDb() {
       }
 
       const userCount = await (UserModel as any).countDocuments();
-      console.log(`✅ MongoDB Synced: Loaded ${userCount} persistent users, ${sessions.length} sessions, and ${alerts.length} alerts.`);
+      await loadPoliciesFromDb();
+      console.log(`✅ MongoDB Synced: Loaded ${userCount} persistent users, ${sessions.length} sessions, ${alerts.length} alerts, and ${policiesCache.length} policies.`);
     } catch (e) {
       console.error("Error loading state from MongoDB:", e);
     }
+  } else if (policiesCache.length === 0) {
+    await loadPoliciesFromDb();
   }
 }
 
 // Register a new employee in MongoDB with hashed password
 export async function registerEmployee(username: string, password: string, department: string = "General Operations", role: string = "EMPLOYEE", displayName?: string) {
   const normalized = username.trim().toLowerCase();
-  const passHash = bcrypt.hashSync(password, 10);
+  const cleanPassword = password.trim();
+  const passHash = bcrypt.hashSync(cleanPassword, 10);
   const now = new Date().toISOString();
   
+  // Wipe any pre-existing brute force failed attempt counts for this employee account
+  delete loginFailures[normalized];
+  if (isDbConnected()) {
+    await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+  }
+
   if (isDbConnected()) {
     const existing = await (UserModel as any).findOne({ username: normalized }).lean();
     if (existing) {
@@ -366,11 +410,24 @@ export async function registerEmployee(username: string, password: string, depar
       if (memIdx !== -1) {
         registeredUsers[memIdx].passwordHash = passHash;
         registeredUsers[memIdx].department = department;
+        registeredUsers[memIdx].active = true;
+      } else {
+        registeredUsers.push({
+          id: updated.id || updated._id,
+          username: normalized,
+          passwordHash: passHash,
+          displayName: updated.displayName || normalized.split("@")[0],
+          department: updated.department,
+          role: updated.role,
+          active: true,
+          createdAt: updated.createdAt,
+          updatedAt: now
+        });
       }
 
       console.log(`✅ MongoDB Updated existing user '${normalized}' credentials.`);
       return {
-        id: updated.id,
+        id: updated.id || updated._id,
         username: updated.username,
         displayName: updated.displayName || updated.username,
         department: updated.department,
@@ -383,6 +440,7 @@ export async function registerEmployee(username: string, password: string, depar
     if (existingMemory) {
       existingMemory.passwordHash = passHash;
       existingMemory.department = department;
+      existingMemory.active = true;
       return {
         id: existingMemory.id,
         username: existingMemory.username,
@@ -604,5 +662,176 @@ export async function addEmployeeTicket(username: string, category: string, text
   }
 
   return ticket;
+}
+
+// ==========================================
+// CLOSED-LOOP DYNAMIC POLICY ENGINE
+// ==========================================
+
+export async function loadPoliciesFromDb() {
+  if (isDbConnected()) {
+    try {
+      const dbPolicies = await (PolicyModel as any).find().lean();
+      if (dbPolicies && dbPolicies.length > 0) {
+        policiesCache = dbPolicies;
+      } else {
+        await bootstrapDefaultPolicies();
+      }
+    } catch (e) {
+      console.error("Error loading policies from DB:", e);
+    }
+  } else if (policiesCache.length === 0) {
+    bootstrapMemoryPolicies();
+  }
+}
+
+export async function bootstrapDefaultPolicies() {
+  const defaults = [
+    {
+      id: "pol_def_1",
+      policyId: "POL-001",
+      title: "Automated Brute Force Silent Deception Diversion",
+      trigger: "3 Failed Login Attempts",
+      condition: "login_failure_count >= 3",
+      action: "DECEPTION",
+      threshold: 30,
+      scope: "AUTH_GATEWAY",
+      priority: 1,
+      status: "ACTIVE",
+      version: 1,
+      deployedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      sourceEvent: "SYSTEM_INITIALIZATION"
+    },
+    {
+      id: "pol_def_2",
+      policyId: "POL-002",
+      title: "Rapid Scripted Navigation Rate Penalty",
+      trigger: "Action Latency < 1500ms",
+      condition: "rapid_clicks_detected == true",
+      action: "INCREASE_MONITORING",
+      threshold: 50,
+      scope: "BEHAVIOR_ENGINE",
+      priority: 2,
+      status: "ACTIVE",
+      version: 1,
+      deployedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      sourceEvent: "SYSTEM_INITIALIZATION"
+    },
+    {
+      id: "pol_def_3",
+      policyId: "POL-003",
+      title: "Decoy Secret Harvest Quarantined Diversion",
+      trigger: "Access to High Sensitivity Decoy Secrets",
+      condition: "secret_harvesting_detected == true",
+      action: "QUARANTINE",
+      threshold: 75,
+      scope: "DECEPTION_SHADOW_ZONE",
+      priority: 3,
+      status: "ACTIVE",
+      version: 1,
+      deployedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      sourceEvent: "SYSTEM_INITIALIZATION"
+    }
+  ];
+
+  for (const pol of defaults) {
+    policiesCache.push(pol);
+    if (isDbConnected()) {
+      await (PolicyModel as any).create(pol).catch(() => {});
+    }
+  }
+}
+
+function bootstrapMemoryPolicies() {
+  policiesCache = [
+    {
+      id: "pol_def_1",
+      policyId: "POL-001",
+      title: "Automated Brute Force Silent Deception Diversion",
+      trigger: "3 Failed Login Attempts",
+      condition: "login_failure_count >= 3",
+      action: "DECEPTION",
+      threshold: 30,
+      scope: "AUTH_GATEWAY",
+      priority: 1,
+      status: "ACTIVE",
+      version: 1,
+      deployedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      sourceEvent: "SYSTEM_INITIALIZATION"
+    },
+    {
+      id: "pol_def_2",
+      policyId: "POL-002",
+      title: "Rapid Scripted Navigation Rate Penalty",
+      trigger: "Action Latency < 1500ms",
+      condition: "rapid_clicks_detected == true",
+      action: "INCREASE_MONITORING",
+      threshold: 50,
+      scope: "BEHAVIOR_ENGINE",
+      priority: 2,
+      status: "ACTIVE",
+      version: 1,
+      deployedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      sourceEvent: "SYSTEM_INITIALIZATION"
+    }
+  ];
+}
+
+export async function getActivePolicies() {
+  if (isDbConnected()) {
+    try {
+      const dbPols = await (PolicyModel as any).find({ status: "ACTIVE" }).sort({ priority: 1 }).lean();
+      if (dbPols && dbPols.length > 0) return dbPols;
+    } catch (e) {}
+  }
+  return policiesCache.filter(p => p.status === "ACTIVE");
+}
+
+export async function getAllPolicies() {
+  if (isDbConnected()) {
+    try {
+      const dbPols = await (PolicyModel as any).find().sort({ _id: -1 }).lean();
+      if (dbPols && dbPols.length > 0) return dbPols;
+    } catch (e) {}
+  }
+  return policiesCache;
+}
+
+export async function deployNewPolicy(policyData: any) {
+  const pId = "pol_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10);
+  const polNum = policyData.policyId || ("POL-" + Math.floor(100 + Math.random() * 900));
+  
+  const newPol = {
+    id: pId,
+    policyId: polNum,
+    title: policyData.title || "Adaptive Threat Response Policy",
+    trigger: policyData.trigger || "Observed Attacker Behavior Pattern",
+    condition: policyData.condition || "threatScore >= threshold",
+    action: policyData.action || "DECEPTION",
+    threshold: Number(policyData.threshold) || 60,
+    scope: policyData.scope || "GATEWAY_ENFORCEMENT",
+    priority: Number(policyData.priority) || 1,
+    status: "ACTIVE",
+    version: Number(policyData.version || 1),
+    deployedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    sourceEvent: policyData.sourceEvent || "AI_ATTACK_ANALYSIS"
+  };
+
+  policiesCache.unshift(newPol);
+
+  if (isDbConnected()) {
+    await (PolicyModel as any).create(newPol).catch(() => {});
+  }
+
+  createAlert("warning", `SECURITY POLICY DEPLOYED TO API GATEWAY: [${newPol.policyId}] '${newPol.title}'. Action: ${newPol.action}. Threshold: ${newPol.threshold}`, "admin_policy_engine");
+  broadcastToAdmins("policy_deployed", newPol);
+
+  return newPol;
 }
 

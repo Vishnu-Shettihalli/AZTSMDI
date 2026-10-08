@@ -29,6 +29,38 @@ export interface Alert {
   sessionId: string;
 }
 
+export interface SecurityPolicy {
+  id: string;
+  policyId: string;
+  title: string;
+  trigger: string;
+  condition: string;
+  action: 'DECEPTION' | 'QUARANTINE' | 'BLOCK' | 'INCREASE_MONITORING';
+  threshold: number;
+  scope: string;
+  priority: number;
+  status: 'ACTIVE' | 'INACTIVE' | 'PENDING_APPROVAL';
+  version: number;
+  deployedAt?: string;
+  createdAt: string;
+  sourceEvent?: string;
+}
+
+export interface AuditEvent {
+  id: string;
+  timestamp: string;
+  sessionId: string;
+  username: string;
+  role: string;
+  action: string;
+  endpoint: string;
+  method: string;
+  status: number;
+  threatScore: number;
+  decision: 'ALLOW' | 'DECEPTION' | 'DENY';
+  details?: string;
+}
+
 export interface DashboardStats {
   totalSessions: number;
   activeGenuine: number;
@@ -36,4 +68,5 @@ export interface DashboardStats {
   avgThreatScore: number;
   mostAccessedResource: string;
   resourceAccessCounts: { name: string; count: number }[];
+  activePoliciesCount?: number;
 }

@@ -154,6 +154,70 @@ const loginFailureSchema = new mongoose.Schema<ILoginFailure>({
   lastAttempt: { type: String, default: () => new Date().toISOString() }
 });
 
+export interface IPolicy {
+  id: string;
+  policyId: string;
+  title: string;
+  trigger: string;
+  condition: string;
+  action: "DECEPTION" | "QUARANTINE" | "BLOCK" | "INCREASE_MONITORING";
+  threshold: number;
+  scope: string;
+  priority: number;
+  status: "ACTIVE" | "INACTIVE" | "PENDING_APPROVAL";
+  version: number;
+  deployedAt?: string;
+  createdAt: string;
+  sourceEvent?: string;
+}
+
+export interface IAuditEvent {
+  id: string;
+  timestamp: string;
+  sessionId: string;
+  username: string;
+  role: string;
+  action: string;
+  endpoint: string;
+  method: string;
+  status: number;
+  threatScore: number;
+  decision: "ALLOW" | "DECEPTION" | "DENY";
+  details?: string;
+}
+
+const policySchema = new mongoose.Schema<IPolicy>({
+  id: { type: String, required: true, unique: true },
+  policyId: { type: String, required: true, unique: true },
+  title: { type: String, required: true },
+  trigger: { type: String, required: true },
+  condition: { type: String, required: true },
+  action: { type: String, enum: ["DECEPTION", "QUARANTINE", "BLOCK", "INCREASE_MONITORING"], required: true },
+  threshold: { type: Number, default: 50 },
+  scope: { type: String, default: "GLOBAL" },
+  priority: { type: Number, default: 1 },
+  status: { type: String, enum: ["ACTIVE", "INACTIVE", "PENDING_APPROVAL"], default: "ACTIVE" },
+  version: { type: Number, default: 1 },
+  deployedAt: { type: String },
+  createdAt: { type: String, default: () => new Date().toISOString() },
+  sourceEvent: { type: String }
+});
+
+const auditEventSchema = new mongoose.Schema<IAuditEvent>({
+  id: { type: String, required: true, unique: true },
+  timestamp: { type: String, default: () => new Date().toISOString() },
+  sessionId: { type: String, required: true },
+  username: { type: String, required: true },
+  role: { type: String, default: "USER" },
+  action: { type: String, required: true },
+  endpoint: { type: String, required: true },
+  method: { type: String, default: "GET" },
+  status: { type: Number, default: 200 },
+  threatScore: { type: Number, default: 0 },
+  decision: { type: String, enum: ["ALLOW", "DECEPTION", "DENY"], default: "ALLOW" },
+  details: { type: String }
+});
+
 export const UserModel = mongoose.models.User || mongoose.model<IUser>("User", userSchema);
 
 export const EmployeeModel = UserModel;
@@ -163,6 +227,8 @@ export const LoginFailureModel = mongoose.models.LoginFailure || mongoose.model<
 export const TaskModel = mongoose.models.Task || mongoose.model<ITask>("Task", taskSchema);
 export const ProjectModel = mongoose.models.Project || mongoose.model<IProject>("Project", projectSchema);
 export const TicketModel = mongoose.models.Ticket || mongoose.model<ITicket>("Ticket", ticketSchema);
+export const PolicyModel = mongoose.models.Policy || mongoose.model<IPolicy>("Policy", policySchema);
+export const AuditEventModel = mongoose.models.AuditEvent || mongoose.model<IAuditEvent>("AuditEvent", auditEventSchema);
 
 let isConnected = false;
 
