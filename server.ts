@@ -72,7 +72,8 @@ app.use(express.json());
 
 // Lazy database connection middleware for Vercel Serverless Function invocations
 app.use(async (req, res, next) => {
-  if (process.env.MONGODB_URI && !isDbConnected()) {
+  const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  if (mongoUri && !isDbConnected()) {
     try {
       await connectMongoDB();
       await loadEmployeesFromDb().catch(() => {});
@@ -934,6 +935,16 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
 // Production-friendly Polling endpoint for Multi-Device Admin Sync across Vercel Functions
 app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
   try {
+    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    if (!isDbConnected() && mongoUri) {
+      try {
+        await connectMongoDB();
+        await loadEmployeesFromDb().catch(() => {});
+      } catch (e) {
+        console.warn("Database reconnection attempt in poll endpoint:", e);
+      }
+    }
+
     let resolvedSessions = sessions;
     let resolvedAlerts = alerts;
     let resolvedEmployees = registeredUsers;
@@ -1003,14 +1014,13 @@ app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
           details: dbQueryErr.message
         });
       }
-    } else if (process.env.NODE_ENV === "production" && process.env.MONGODB_URI) {
-      // If DB is configured in production but currently disconnected, return error preserving state
+    } else if (resolvedSessions.length === 0 && (process.env.MONGODB_URI || process.env.MONGO_URI)) {
+      // If DB is configured in production, still disconnected, and no active sessions in memory
       return res.status(503).json({
         status: "error",
         code: "DB_DISCONNECTED",
         message: "MongoDB connection is initializing or reconnecting.",
-        stats: getStats(sessions),
-        sessions: sessions.length > 0 ? sessions : undefined
+        stats: getStats(sessions)
       });
     }
 

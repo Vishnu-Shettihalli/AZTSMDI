@@ -257,7 +257,7 @@ mongoose.connection.on("error", () => {
 });
 
 export async function connectMongoDB(): Promise<boolean> {
-  const uri = process.env.MONGODB_URI;
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
 
   if (!uri || uri.includes("YOUR_MONGODB_URI") || uri.includes("placeholder")) {
     console.warn("⚠️ MONGODB_URI environment variable not set or invalid. Running with in-memory persistence mode.");
