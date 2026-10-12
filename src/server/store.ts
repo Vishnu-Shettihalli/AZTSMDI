@@ -6,9 +6,10 @@ import { UserModel, SessionModel, AlertModel, LoginFailureModel, TaskModel, Proj
 import { generateAttackerSummary } from './gemini.js';
 
 export const getJwtSecret = (): string => {
-  const envSecret = process.env.JWT_SECRET || process.env.SESSION_SECRET;
-  if (envSecret && envSecret.trim() !== "" && !envSecret.includes("placeholder")) {
-    return envSecret.trim();
+  const rawSecret = (process.env.JWT_SECRET || process.env.SESSION_SECRET || "").trim();
+  const envSecret = rawSecret.replace(/^["']/, "").replace(/["']$/, "").trim();
+  if (envSecret && envSecret !== "" && !envSecret.includes("placeholder")) {
+    return envSecret;
   }
   if (process.env.NODE_ENV === "production") {
     throw new Error("JWT_SECRET or SESSION_SECRET environment variable is missing in production environment.");

@@ -441,9 +441,9 @@ app.post("/api/auth/admin-login", async (req, res) => {
     }
 
     // 2. Identify configured Admin environment credentials
-    const envAdminUser = (process.env.ADMIN_USERNAME || "").trim().toLowerCase();
-    const envAdminPass = process.env.ADMIN_PASSWORD || "";
-    const envAdminPassHash = process.env.ADMIN_PASSWORD_HASH || "";
+    const envAdminUser = (process.env.ADMIN_USERNAME || "").trim().replace(/^["']/, "").replace(/["']$/, "").trim().toLowerCase();
+    const envAdminPass = (process.env.ADMIN_PASSWORD || "").trim().replace(/^["']/, "").replace(/["']$/, "").trim();
+    const envAdminPassHash = (process.env.ADMIN_PASSWORD_HASH || "").trim().replace(/^["']/, "").replace(/["']$/, "").trim();
 
     let authenticatedAdminUser: any = null;
 

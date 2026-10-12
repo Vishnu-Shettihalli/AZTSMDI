@@ -259,7 +259,8 @@ mongoose.connection.on("error", () => {
 export let lastConnectionError: string | null = null;
 
 export async function connectMongoDB(): Promise<boolean> {
-  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  const rawUri = (process.env.MONGODB_URI || process.env.MONGO_URI || "").trim();
+  const uri = rawUri.replace(/^["']/, "").replace(/["']$/, "").trim();
 
   if (!uri || uri.includes("YOUR_MONGODB_URI") || uri.includes("placeholder")) {
     lastConnectionError = "MONGODB_URI not set or is placeholder";
