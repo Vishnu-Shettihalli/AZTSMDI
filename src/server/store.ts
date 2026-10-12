@@ -10,7 +10,10 @@ export const getJwtSecret = (): string => {
   if (envSecret && envSecret.trim() !== "" && !envSecret.includes("placeholder")) {
     return envSecret.trim();
   }
-  return "AZTSMDI_PRODUCTION_SECURE_JWT_SECRET_KEY_2026";
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET or SESSION_SECRET environment variable is missing in production environment.");
+  }
+  return "AZTSMDI_DEVELOPMENT_ONLY_JWT_SECRET_KEY_2026";
 };
 
 export function generateJwtToken(payload: { userId: string; username: string; role: string; sessionId: string; status: string }) {

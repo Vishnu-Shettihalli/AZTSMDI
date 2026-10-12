@@ -309,26 +309,26 @@ async function bootstrapInitialAdmin() {
   try {
     const adminCount = await (UserModel as any).countDocuments({ role: "ADMIN" });
     if (adminCount === 0) {
-      const adminUsername = (process.env.ADMIN_USERNAME || "admin@svit.edu").trim().toLowerCase();
-      
+      const adminUsername = (process.env.ADMIN_USERNAME || "").trim().toLowerCase();
       let passHash = process.env.ADMIN_PASSWORD_HASH;
-      if (!passHash) {
-        const rawPassword = process.env.ADMIN_PASSWORD || "AdminSecurePass#2026";
-        passHash = bcrypt.hashSync(rawPassword, 10);
+      if (!passHash && process.env.ADMIN_PASSWORD) {
+        passHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
       }
 
-      await (UserModel as any).create({
-        id: "usr_admin_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10),
-        username: adminUsername,
-        passwordHash: passHash,
-        displayName: "SOC Lead Administrator",
-        department: "Cybersecurity Operations",
-        role: "ADMIN",
-        active: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      });
-      console.log(`✅ Initial Admin Account bootstrapped to MongoDB Database (${adminUsername})!`);
+      if (adminUsername && passHash) {
+        await (UserModel as any).create({
+          id: "usr_admin_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10),
+          username: adminUsername,
+          passwordHash: passHash,
+          displayName: "SOC Lead Administrator",
+          department: "Cybersecurity Operations",
+          role: "ADMIN",
+          active: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        console.log(`✅ Initial Admin Account bootstrapped to MongoDB Database (${adminUsername})!`);
+      }
     }
   } catch (e) {
     console.error("Error bootstrapping initial admin account:", e);

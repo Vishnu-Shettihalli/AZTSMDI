@@ -86,7 +86,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
 
             <button
               type="button"
-              onClick={() => { setLoginRole("admin"); setError(null); setUsername("admin"); setPassword("admin123"); }}
+              onClick={() => { setLoginRole("admin"); setError(null); setUsername(""); setPassword(""); }}
               className={`flex-1 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
                 loginRole === "admin"
                   ? "bg-slate-900 text-amber-400 shadow-sm"
@@ -182,7 +182,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder={loginRole === "admin" ? "admin" : "employee@svit.edu"}
+                    placeholder={loginRole === "admin" ? "admin@svit.edu" : "employee@svit.edu"}
                     className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 transition"
                     disabled={loading}
                   />

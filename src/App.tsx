@@ -71,6 +71,7 @@ export default function App() {
     setUserRole(null);
     localStorage.removeItem("active_security_session");
     localStorage.removeItem("active_security_role");
+    localStorage.removeItem("jwt_token");
   };
 
   return (

@@ -123,72 +123,66 @@ export async function findSession(sessionId: string): Promise<any> {
   return session || null;
 }
 
-// Helper middleware for Admin Authorization
+// Helper middleware for Admin Authorization (Strict RBAC & Signature Verification)
 export const requireAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const authHeader = (req.headers["authorization"] as string) || "";
   const rawToken = authHeader.replace("Bearer ", "").trim();
-  const sessionId = (req.headers["x-session-id"] as string) || 
-                    rawToken || 
-                    (req.query.sessionId as string) || 
-                    req.body?.sessionId;
+  const sessionIdHeader = (req.headers["x-session-id"] as string) || (req.query.sessionId as string) || req.body?.sessionId;
 
-  // Allow requests from Admin Dashboard context
-  if (!sessionId || sessionId === "admin_session" || sessionId === "admin") {
+  // 1. Must supply either a Bearer JWT token or an authenticated session identifier
+  if (!rawToken && !sessionIdHeader) {
+    return res.status(401).json({ status: "error", message: "Authentication required: Missing authorization credentials." });
+  }
+
+  // 2. Validate JWT token if provided
+  let jwtPayload: any = null;
+  if (rawToken) {
+    jwtPayload = verifyJwtToken(rawToken);
+    if (!jwtPayload && !sessionIdHeader) {
+      return res.status(401).json({ status: "error", message: "Unauthorized: Invalid, expired, or tampered token." });
+    }
+  }
+
+  // If JWT payload exists, it MUST have role === "ADMIN" and NOT be a Deception session
+  if (jwtPayload) {
+    const jwtRole = String(jwtPayload.role || "").toUpperCase();
+    if (jwtRole !== "ADMIN") {
+      return res.status(403).json({ status: "error", message: "Forbidden: Administrative privileges required." });
+    }
+    if (jwtPayload.status === "Deception") {
+      return res.status(403).json({ status: "error", message: "Access Denied: Deception session cannot access administrative endpoints." });
+    }
+  }
+
+  // 3. Resolve target session identity
+  const targetSessionId = jwtPayload?.sessionId || sessionIdHeader;
+  if (!targetSessionId || targetSessionId === "admin_session" || targetSessionId === "admin") {
+    // If only placeholder string was passed without verified Admin JWT, reject!
+    if (!jwtPayload || String(jwtPayload.role || "").toUpperCase() !== "ADMIN") {
+      return res.status(401).json({ status: "error", message: "Authentication required: Valid administrator JWT token required." });
+    }
     return next();
   }
 
-  // Verify JWT payload directly
-  const jwtPayload = verifyJwtToken(authHeader || rawToken);
-  if (jwtPayload && (String(jwtPayload.role || "").toUpperCase() === "ADMIN" || String(jwtPayload.username || "").toLowerCase().includes("admin"))) {
-    return next();
-  }
-
-  if (!isDbConnected() && process.env.MONGODB_URI) {
-    try {
-      await connectMongoDB();
-    } catch (e) {}
-  }
-
-  const targetSessionId = jwtPayload?.sessionId || sessionId;
   const session = await findSession(targetSessionId);
-  if (session) {
-    const sessRole = String(session.role || "").toUpperCase();
-    if (sessRole === "ADMIN" || session.username?.toLowerCase().includes("admin")) {
+  if (!session) {
+    if (jwtPayload && String(jwtPayload.role || "").toUpperCase() === "ADMIN") {
       return next();
     }
-    if (isDbConnected() && session.username) {
-      const dbUser = await (UserModel as any).findOne({ username: session.username.toLowerCase() }).lean();
-      if (dbUser && String(dbUser.role || "").toUpperCase() === "ADMIN") {
-        return next();
-      }
-    }
+    return res.status(401).json({ status: "error", message: "Unauthorized: Administrator session not found." });
   }
 
-  // Direct token or session validation against DB
-  if (isDbConnected()) {
-    try {
-      const dbSess = await (SessionModel as any).findOne({ id: targetSessionId }).lean();
-      if (dbSess) {
-        const dbRole = String(dbSess.role || "").toUpperCase();
-        if (dbRole === "ADMIN") {
-          return next();
-        }
-        if (dbSess.username) {
-          const dbUser = await (UserModel as any).findOne({ username: dbSess.username.toLowerCase() }).lean();
-          if (dbUser && String(dbUser.role || "").toUpperCase() === "ADMIN") {
-            return next();
-          }
-        }
-      }
-    } catch (e) {}
+  // 4. Verify session role and status strictly
+  if (session.status === "Deception") {
+    return res.status(403).json({ status: "error", message: "Access Denied: Deception session cannot access administrative endpoints." });
   }
 
-  // Fallback: if caller is logged into Admin UI with active session UUID
-  if (targetSessionId && targetSessionId.startsWith("sess_")) {
-    return next();
+  const sessionRole = String(session.role || "").toUpperCase();
+  if (sessionRole !== "ADMIN") {
+    return res.status(403).json({ status: "error", message: "Forbidden: Administrator privileges required." });
   }
 
-  return res.status(403).json({ status: "error", message: "Admin authorization required." });
+  return next();
 };
 
 // ==========================================
@@ -217,7 +211,7 @@ export const intelligentApiGateway = async (req: express.Request, res: express.R
   let session = targetSessionId ? await findSession(targetSessionId) : null;
 
   // Reject tampered/invalid Bearer JWT tokens on protected endpoints
-  if (authHeader.startsWith("Bearer ") && !jwtPayload && !session && !targetSessionId?.startsWith("sess_") && targetSessionId !== "admin_session" && targetSessionId !== "admin") {
+  if (authHeader.startsWith("Bearer ") && !jwtPayload) {
     return res.status(401).json({ status: "error", message: "Invalid, tampered, or expired JWT Token signature." });
   }
 
@@ -409,52 +403,94 @@ app.post("/api/auth/admin-login", async (req, res) => {
     const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
     const userAgent = (req.headers["user-agent"] as string) || "Unknown User Agent";
 
-    if (!username) {
-      return res.status(400).json({ status: "error", message: "Admin username is required." });
+    if (!username || !password) {
+      return res.status(400).json({ status: "error", message: "Admin username and password are required." });
     }
 
     const normalized = username.trim().toLowerCase();
+    const cleanPassword = password.trim();
 
-    // Authenticate against MongoDB Admin record
-    if (isDbConnected()) {
+    // 1. Ensure DB connection is active if configured
+    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    if (!isDbConnected() && mongoUri) {
       try {
-        const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
-        if (dbUser && dbUser.role === "ADMIN" && dbUser.passwordHash) {
-          if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
-            const session = await createSession(dbUser.username, "Genuine", ip, userAgent, "ADMIN", dbUser.id);
-            const token = generateJwtToken({
-              userId: dbUser.id || session.id,
-              username: dbUser.username,
-              role: "ADMIN",
-              sessionId: session.id,
-              status: "Genuine"
-            });
-            return res.json({
-              status: "success",
-              token,
-              role: "admin",
-              session: {
-                id: session.id,
-                username: dbUser.displayName || dbUser.username,
-                role: "admin"
-              }
-            });
-          }
-        }
+        await connectMongoDB();
       } catch (e) {}
     }
 
-    // Check if password matches env ADMIN_PASSWORD or default admin credentials
-    const envAdminUser = (process.env.ADMIN_USERNAME || "admin@svit.edu").toLowerCase();
-    const envAdminPass = process.env.ADMIN_PASSWORD || "AdminSecurePass#2026";
-    const isAdminUserMatch = normalized === envAdminUser || normalized === "admin" || normalized === "admin@svit.edu";
-    const isAdminPassMatch = password === envAdminPass || password === "admin123" || password === "admin" || password === "AdminSecurePass#2026";
+    // 2. Identify configured Admin environment credentials
+    const envAdminUser = (process.env.ADMIN_USERNAME || "").trim().toLowerCase();
+    const envAdminPass = process.env.ADMIN_PASSWORD || "";
+    const envAdminPassHash = process.env.ADMIN_PASSWORD_HASH || "";
 
-    if (isAdminUserMatch && isAdminPassMatch) {
-      const session = await createSession(normalized, "Genuine", ip, userAgent, "ADMIN");
+    let authenticatedAdminUser: any = null;
+
+    // 3. Authenticate against MongoDB UserModel
+    if (isDbConnected()) {
+      try {
+        const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
+        if (dbUser && String(dbUser.role || "").toUpperCase() === "ADMIN" && dbUser.passwordHash) {
+          if (bcrypt.compareSync(cleanPassword, dbUser.passwordHash) || bcrypt.compareSync(password, dbUser.passwordHash)) {
+            authenticatedAdminUser = dbUser;
+          }
+        }
+      } catch (e) {
+        console.error("DB query error during admin authentication:", e);
+      }
+    }
+
+    // 4. Authenticate against configured environment variables if not matched in DB yet
+    if (!authenticatedAdminUser && envAdminUser && normalized === envAdminUser) {
+      let isEnvPassValid = false;
+      if (envAdminPassHash) {
+        isEnvPassValid = bcrypt.compareSync(cleanPassword, envAdminPassHash) || bcrypt.compareSync(password, envAdminPassHash);
+      } else if (envAdminPass) {
+        isEnvPassValid = (cleanPassword === envAdminPass) || (password === envAdminPass) || (envAdminPass.startsWith("$2") && bcrypt.compareSync(cleanPassword, envAdminPass));
+      }
+
+      if (isEnvPassValid) {
+        authenticatedAdminUser = {
+          id: "usr_admin_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10),
+          username: normalized,
+          displayName: "SOC Lead Administrator",
+          role: "ADMIN"
+        };
+
+        // Synchronize this verified admin record into MongoDB so it is authoritative
+        if (isDbConnected()) {
+          try {
+            const hashToSave = envAdminPassHash || bcrypt.hashSync(envAdminPass, 10);
+            await (UserModel as any).updateOne(
+              { username: normalized },
+              {
+                $set: {
+                  username: normalized,
+                  passwordHash: hashToSave,
+                  displayName: "SOC Lead Administrator",
+                  department: "Cybersecurity Operations",
+                  role: "ADMIN",
+                  active: true,
+                  updatedAt: new Date().toISOString()
+                },
+                $setOnInsert: {
+                  id: authenticatedAdminUser.id,
+                  createdAt: new Date().toISOString()
+                }
+              },
+              { upsert: true }
+            );
+          } catch (e) {
+            console.error("Error syncing env admin user to DB:", e);
+          }
+        }
+      }
+    }
+
+    if (authenticatedAdminUser) {
+      const session = await createSession(authenticatedAdminUser.username, "Genuine", ip, userAgent, "ADMIN", authenticatedAdminUser.id);
       const token = generateJwtToken({
-        userId: session.id,
-        username: normalized,
+        userId: authenticatedAdminUser.id || session.id,
+        username: authenticatedAdminUser.username,
         role: "ADMIN",
         sessionId: session.id,
         status: "Genuine"
@@ -465,9 +501,17 @@ app.post("/api/auth/admin-login", async (req, res) => {
         role: "admin",
         session: {
           id: session.id,
-          username: "SOC Security Lead",
+          username: authenticatedAdminUser.displayName || authenticatedAdminUser.username,
           role: "ADMIN"
         }
+      });
+    }
+
+    // 5. If configuration is missing in production and DB has no admin
+    if (!envAdminUser && !envAdminPass && !envAdminPassHash && (!isDbConnected() || !(await (UserModel as any).countDocuments({ role: "ADMIN" }).catch(() => 0)))) {
+      return res.status(500).json({
+        status: "error",
+        message: "Admin authentication configuration missing. Please configure ADMIN_USERNAME and ADMIN_PASSWORD in environment."
       });
     }
 
