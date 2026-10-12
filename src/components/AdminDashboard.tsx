@@ -155,7 +155,7 @@ export default function AdminDashboard() {
   const alertsEndRef = useRef<HTMLDivElement>(null);
 
   // Dynamic employees admin state
-  const [employeesList, setEmployeesList] = useState<{ username: string; password?: string; department?: string; role?: string }[]>([]);
+  const [employeesList, setEmployeesList] = useState<{ id?: string; username: string; password?: string; department?: string; role?: string }[]>([]);
   const [newEmployeeEmail, setNewEmployeeEmail] = useState("");
   const [newEmployeePassword, setNewEmployeePassword] = useState("");
   const [newEmployeeDept, setNewEmployeeDept] = useState("Engineering & IT");
@@ -163,6 +163,7 @@ export default function AdminDashboard() {
   const [employeeError, setEmployeeError] = useState<string | null>(null);
   const [employeeSuccess, setEmployeeSuccess] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
+  const [removingEmployee, setRemovingEmployee] = useState<string | null>(null);
 
   // Closed-loop Dynamic Security Policies state
   const [securityPolicies, setSecurityPolicies] = useState<SecurityPolicy[]>([]);
@@ -466,24 +467,35 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleRemoveEmployee = async (username: string) => {
+  const handleRemoveEmployee = async (username: string, id?: string) => {
+    if (removingEmployee) return;
+    setRemovingEmployee(username);
     setEmployeeError(null);
     setEmployeeSuccess(null);
     try {
-      const res = await fetch(`/api/admin/employees/${encodeURIComponent(username)}`, {
+      const targetParam = encodeURIComponent(id || username);
+      const res = await fetch(`/api/admin/employees/${targetParam}`, {
         method: "DELETE",
         headers: getAdminHeaders()
       });
       const data = await res.json();
-      if (data.status === "success") {
-        setEmployeeSuccess(data.message || "Employee removed successfully.");
-        fetchAllData();
+      if (res.ok && data.status === "success") {
+        setEmployeeSuccess(data.message || `Employee '${username}' removed successfully.`);
+        // Immediately and authoritatively remove from frontend state
+        setEmployeesList(prev => prev.filter(e => 
+          e.username.toLowerCase() !== username.toLowerCase() && (!id || (e as any).id !== id)
+        ));
+        // Also remove any active session for this user from active sessions view
+        setActiveSessions(prev => prev.filter(s => s.username.toLowerCase() !== username.toLowerCase()));
+        fetchAllData(true);
       } else {
         setEmployeeError(data.message || "Failed to remove employee.");
       }
     } catch (err) {
       console.error(err);
-      setEmployeeError("Error removing employee.");
+      setEmployeeError("Network error occurred while removing employee.");
+    } finally {
+      setRemovingEmployee(null);
     }
   };
 
@@ -1012,11 +1024,16 @@ export default function AdminDashboard() {
                             </span>
                             <button
                               type="button"
-                              onClick={() => handleRemoveEmployee(emp.username)}
-                              className="p-1 px-2 rounded bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 transition-colors font-mono font-bold text-[10px] flex items-center justify-center gap-1 cursor-pointer"
+                              disabled={removingEmployee === emp.username}
+                              onClick={() => handleRemoveEmployee(emp.username, (emp as any).id)}
+                              className="p-1 px-2 rounded bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 transition-colors font-mono font-bold text-[10px] flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
                               title={`Remove ${emp.username} from company`}
                             >
-                              - Remove
+                              {removingEmployee === emp.username ? (
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                              ) : (
+                                "- Remove"
+                              )}
                             </button>
                           </div>
                         </div>

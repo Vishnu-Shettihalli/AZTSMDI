@@ -252,6 +252,22 @@ export const intelligentApiGateway = async (req: express.Request, res: express.R
     return res.status(403).json({ status: "error", message: "Access Denied: Session restricted to Aegis Deception Environment." });
   }
 
+  // Terminated or Revoked session rejection on Employee routes
+  if (isEmployeeRoute) {
+    if (!session || session.active === false || session.status === "Terminated" || session.status === "Expired") {
+      return res.status(403).json({ status: "error", message: "Access Denied: Session is terminated, revoked, or expired." });
+    }
+    // Signature verification alone is insufficient: verify user account persists and is active in database
+    if (session.username && session.username !== "admin@svit.edu") {
+      if (isDbConnected()) {
+        const dbUser = await (UserModel as any).findOne({ username: session.username.toLowerCase() }).lean().catch(() => null);
+        if (!dbUser || dbUser.active === false) {
+          return res.status(403).json({ status: "error", message: "Access Denied: Employee account has been deactivated or removed from registry." });
+        }
+      }
+    }
+  }
+
   // Role isolation: Non-admin EMPLOYEE sessions CANNOT access Admin endpoints
   if (role === "EMPLOYEE" && isAdminRoute) {
     return res.status(403).json({ status: "error", message: "Access Denied: Admin authorization required." });
@@ -918,14 +934,45 @@ app.post("/api/admin/employees", requireAdmin, async (req, res) => {
   }
 });
 
-app.delete("/api/admin/employees/:username", requireAdmin, async (req, res) => {
-  const { username } = req.params;
+app.delete("/api/admin/employees/:identifier", requireAdmin, async (req, res) => {
+  const { identifier } = req.params;
   try {
-    const removed = await removeEmployee(username);
-    await createAlert("warning", `Admin removed employee '${username}' from company registry.`, "admin_console");
-    res.json({ status: "success", message: `Employee '${username}' removed successfully.`, removed });
+    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    if (!isDbConnected() && mongoUri) {
+      try {
+        await connectMongoDB();
+      } catch (e) {}
+    }
+
+    const result = await removeEmployee(identifier);
+
+    if (!result.success) {
+      if (result.code === "NOT_FOUND") {
+        return res.status(404).json({ status: "error", code: "NOT_FOUND", message: result.message });
+      }
+      if (result.code === "FORBIDDEN") {
+        return res.status(403).json({ status: "error", code: "FORBIDDEN", message: result.message });
+      }
+      return res.status(500).json({ status: "error", code: result.code, message: result.message });
+    }
+
+    // Record EXACTLY ONE alert for confirmed successful removal
+    await createAlert(
+      "warning",
+      `Admin removed employee '${result.employee?.username}' (ID: ${result.employee?.id}) from company registry. Access revoked.`,
+      "admin_console"
+    );
+
+    res.json({
+      status: "success",
+      message: result.message,
+      employee: result.employee,
+      deletedCount: result.deletedCount,
+      revokedSessionsCount: result.revokedSessionsCount
+    });
   } catch (err: any) {
-    res.status(400).json({ status: "error", message: err.message || "Removal failed." });
+    console.error("Critical error in employee removal endpoint:", err);
+    res.status(500).json({ status: "error", message: err.message || "Removal failed." });
   }
 });
 

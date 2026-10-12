@@ -614,41 +614,197 @@ export async function registerEmployee(username: string, password: string, depar
   };
 }
 
-// Remove an employee from MongoDB
-export async function removeEmployee(username: string) {
-  const normalized = username.trim().toLowerCase();
-
-  registeredUsers = registeredUsers.filter(u => u.username !== normalized);
-
-  if (isDbConnected()) {
-    const res = await (UserModel as any).deleteOne({ username: normalized });
-    console.log(`✅ MongoDB Deleted user '${normalized}' (Count: ${res.deletedCount})`);
-  }
-
-  return { username: normalized };
+export interface RemoveEmployeeResult {
+  success: boolean;
+  code: "SUCCESS" | "NOT_FOUND" | "FORBIDDEN" | "DB_FAILURE";
+  message: string;
+  employee?: {
+    id: string;
+    username: string;
+    role: string;
+    department?: string;
+  };
+  deletedCount?: number;
+  revokedSessionsCount?: number;
 }
 
-// Query all registered users from MongoDB
+// Remove an employee from MongoDB, verify deletion, and immediately revoke all sessions
+export async function removeEmployee(identifier: string): Promise<RemoveEmployeeResult> {
+  const cleanId = (identifier || "").trim();
+  const normalized = cleanId.toLowerCase();
+
+  if (!cleanId) {
+    return { success: false, code: "NOT_FOUND", message: "Employee identifier is required." };
+  }
+
+  const envAdminUser = (process.env.ADMIN_USERNAME || "").trim().toLowerCase();
+
+  // Find user in MongoDB if connected, or memory cache
+  let targetUser: any = null;
+
+  if (isDbConnected()) {
+    try {
+      targetUser = await (UserModel as any).findOne({
+        $or: [
+          { id: cleanId },
+          { username: normalized }
+        ]
+      }).lean();
+    } catch (err: any) {
+      console.error("Error finding employee in DB:", err);
+      return { success: false, code: "DB_FAILURE", message: "Database query failed: " + err.message };
+    }
+  }
+
+  if (!targetUser) {
+    targetUser = registeredUsers.find(u => u.id === cleanId || u.username.toLowerCase() === normalized);
+  }
+
+  if (!targetUser) {
+    return {
+      success: false,
+      code: "NOT_FOUND",
+      message: `Employee '${identifier}' not found or already removed.`
+    };
+  }
+
+  // Prevent removal of primary administrator
+  if (
+    targetUser.role === "ADMIN" ||
+    targetUser.username.toLowerCase() === "admin@svit.edu" ||
+    (envAdminUser && targetUser.username.toLowerCase() === envAdminUser)
+  ) {
+    return {
+      success: false,
+      code: "FORBIDDEN",
+      message: "Security Violation: Primary Administrator account cannot be removed from company registry."
+    };
+  }
+
+  const canonicalId = targetUser.id || targetUser._id;
+  const canonicalUsername = targetUser.username.toLowerCase();
+  let deletedCount = 0;
+
+  if (isDbConnected()) {
+    try {
+      const delRes = await (UserModel as any).deleteOne({
+        $or: [
+          { id: canonicalId },
+          { username: canonicalUsername }
+        ]
+      });
+      deletedCount = delRes.deletedCount || 0;
+      if (deletedCount === 0) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          message: `Employee '${identifier}' was not found in database or already removed.`
+        };
+      }
+      console.log(`✅ MongoDB Deleted user '${canonicalUsername}' (ID: ${canonicalId}, Count: ${deletedCount})`);
+    } catch (err: any) {
+      console.error("Error deleting employee from DB:", err);
+      return { success: false, code: "DB_FAILURE", message: "Failed to delete employee: " + err.message };
+    }
+  } else {
+    deletedCount = 1;
+  }
+
+  // Remove from in-memory users cache
+  registeredUsers = registeredUsers.filter(
+    u => u.id !== canonicalId && u.username.toLowerCase() !== canonicalUsername
+  );
+
+  // IMMEDIATELY REVOKE ALL SESSIONS for this employee
+  let revokedSessionsCount = 0;
+  const nowIso = new Date().toISOString();
+
+  if (isDbConnected()) {
+    try {
+      const sessRes = await (SessionModel as any).updateMany(
+        {
+          $or: [
+            { username: canonicalUsername },
+            { userId: canonicalId },
+            { userId: canonicalUsername }
+          ],
+          active: true
+        },
+        {
+          $set: {
+            active: false,
+            status: "Terminated",
+            terminatedAt: nowIso
+          }
+        }
+      );
+      revokedSessionsCount = sessRes.modifiedCount || 0;
+      console.log(`✅ MongoDB Revoked ${revokedSessionsCount} active sessions for '${canonicalUsername}'.`);
+    } catch (err) {
+      console.error("Error revoking sessions in DB:", err);
+    }
+  }
+
+  // Terminate in in-memory session cache
+  sessions.forEach(s => {
+    if (
+      s.username.toLowerCase() === canonicalUsername ||
+      s.userId === canonicalId ||
+      s.userId === canonicalUsername
+    ) {
+      s.active = false;
+      s.status = "Terminated";
+      s.terminatedAt = nowIso;
+      revokedSessionsCount++;
+    }
+  });
+
+  // Clear any login failure tracking
+  delete loginFailures[canonicalUsername];
+  if (isDbConnected()) {
+    await (LoginFailureModel as any).deleteOne({ username: canonicalUsername }).catch(() => {});
+  }
+
+  return {
+    success: true,
+    code: "SUCCESS",
+    message: `Employee '${canonicalUsername}' removed successfully.`,
+    employee: {
+      id: canonicalId,
+      username: canonicalUsername,
+      role: targetUser.role,
+      department: targetUser.department
+    },
+    deletedCount,
+    revokedSessionsCount
+  };
+}
+
+// Query all registered employees from MongoDB (strictly filtering role: EMPLOYEE)
 export async function getRegisteredEmployees() {
   if (isDbConnected()) {
-    const docs = await (UserModel as any).find({}, { passwordHash: 0 }).lean();
+    const docs = await (UserModel as any).find({ role: "EMPLOYEE" }, { passwordHash: 0 }).lean();
     return docs.map((d: any) => ({
-      id: d.id,
+      id: d.id || d._id,
       username: d.username,
       displayName: d.displayName || d.username,
       department: d.department || "General Operations",
       role: d.role || "EMPLOYEE",
+      active: d.active !== false,
       createdAt: d.createdAt
     }));
   }
-  return registeredUsers.map(u => ({
-    id: u.id,
-    username: u.username,
-    displayName: u.displayName,
-    department: u.department,
-    role: u.role,
-    createdAt: u.createdAt
-  }));
+  return registeredUsers
+    .filter(u => u.role === "EMPLOYEE")
+    .map(u => ({
+      id: u.id,
+      username: u.username,
+      displayName: u.displayName,
+      department: u.department,
+      role: u.role,
+      active: u.active !== false,
+      createdAt: u.createdAt
+    }));
 }
 
 // ==========================================
