@@ -8,17 +8,24 @@ export interface LogEntry {
 
 export interface Session {
   id: string;
+  sessionId?: string;
+  userId?: string;
   username: string;
   role?: string;
   ip: string;
   userAgent: string;
   loginTime: string;
-  status: 'Genuine' | 'Deception';
+  lastActivityAt?: string;
+  expiresAt?: string;
+  active?: boolean;
+  status: 'Genuine' | 'Deception' | 'Terminated' | 'Expired';
   threatScore: number;
   failedAttempts: number;
   logs: LogEntry[];
   aiSummary?: string;
   generatingSummary?: boolean;
+  isSimulation?: boolean;
+  terminatedAt?: string;
 }
 
 export interface Alert {

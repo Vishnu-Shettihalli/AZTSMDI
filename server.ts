@@ -9,6 +9,8 @@ import crypto from "crypto";
 import { fileURLToPath } from "url";
 import {
   sessions,
+  setSessions,
+  isSessionActive,
   alerts,
   loginFailures,
   createSession,
@@ -37,6 +39,7 @@ import {
   getActivePolicies,
   deployNewPolicy
 } from "./src/server/store.js";
+import { Session, Alert } from "./src/types.js";
 import { generateAttackerSummary } from "./src/server/gemini.js";
 import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, PolicyModel, AuditEventModel, isDbConnected, lastConnectionError } from "./src/server/db.js";
 
@@ -1011,29 +1014,54 @@ app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
       }
     }
 
-    let resolvedSessions = sessions;
-    let resolvedAlerts = alerts;
-    let resolvedEmployees = registeredUsers;
+    let resolvedSessions: Session[] = [];
+    let resolvedAlerts: Alert[] = [];
+    let resolvedEmployees: any[] = [];
     let resolvedPolicies: any[] = await getAllPolicies();
 
     if (isDbConnected()) {
       try {
+        const now = new Date();
+        const idleThreshold = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+
+        // Expire any sessions that passed expiresAt or have been idle for > 45 mins
+        await (SessionModel as any).updateMany(
+          {
+            active: true,
+            $or: [
+              { expiresAt: { $lte: now } },
+              { lastActivityAt: { $lte: idleThreshold } }
+            ]
+          },
+          { $set: { active: false, status: "Expired" } }
+        ).catch(() => {});
+
+        // Query ONLY currently active sessions for the live monitoring view
         const [dbSessions, dbAlerts, empList, polList] = await Promise.all([
-          (SessionModel as any).find().sort({ _id: -1 }).lean(),
+          (SessionModel as any).find({ 
+            active: true, 
+            status: { $in: ["Genuine", "Deception"] } 
+          }).sort({ _id: -1 }).lean(),
           (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean(),
-          (UserModel as any).find({}, { passwordHash: 0 }).lean(),
+          (UserModel as any).find({ role: "EMPLOYEE" }, { passwordHash: 0 }).lean(),
           getAllPolicies()
         ]);
 
         if (dbSessions) {
           resolvedSessions = dbSessions.map((s: any) => ({
             id: s.id || s.sessionId,
+            sessionId: s.sessionId || s.id,
+            userId: s.userId || "",
             username: s.username,
             role: s.role || "USER",
             ip: s.ip || "127.0.0.1",
             userAgent: s.userAgent || "Browser",
             loginTime: s.loginTime || new Date().toISOString(),
+            lastActivityAt: s.lastActivityAt || s.loginTime,
+            expiresAt: s.expiresAt ? new Date(s.expiresAt).toISOString() : undefined,
             status: s.status,
+            active: s.active !== false,
+            isSimulation: Boolean(s.isSimulation),
             threatScore: s.threatScore || 0,
             failedAttempts: s.failedAttempts || 0,
             generatingSummary: s.generatingSummary || false,
@@ -1041,15 +1069,8 @@ app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
             logs: s.logs || []
           }));
 
-          // Synchronize in-memory cache
-          resolvedSessions.forEach((ms: any) => {
-            const idx = sessions.findIndex(s => s.id === ms.id);
-            if (idx === -1) {
-              sessions.unshift(ms);
-            } else {
-              sessions[idx] = ms;
-            }
-          });
+          // Synchronize in-memory cache to only reflect active sessions
+          setSessions(resolvedSessions);
         }
 
         if (dbAlerts && dbAlerts.length > 0) {
@@ -1063,6 +1084,7 @@ app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
             displayName: d.displayName || d.username,
             department: d.department || "General Operations",
             role: d.role || "EMPLOYEE",
+            active: d.active !== false,
             createdAt: d.createdAt
           }));
         }
@@ -1072,7 +1094,6 @@ app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
         }
       } catch (dbQueryErr: any) {
         console.error("Database query error in /api/admin/events-poll:", dbQueryErr);
-        // Do NOT convert DB query errors silently into empty data
         return res.status(503).json({
           status: "error",
           code: "DB_QUERY_FAILURE",
@@ -1080,14 +1101,10 @@ app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
           details: dbQueryErr.message
         });
       }
-    } else if (resolvedSessions.length === 0 && (process.env.MONGODB_URI || process.env.MONGO_URI)) {
-      // If DB is configured in production, still disconnected, and no active sessions in memory
-      return res.status(503).json({
-        status: "error",
-        code: "DB_DISCONNECTED",
-        message: "MongoDB connection is initializing or reconnecting.",
-        stats: getStats(sessions)
-      });
+    } else {
+      resolvedSessions = sessions.filter(s => isSessionActive(s));
+      resolvedAlerts = alerts;
+      resolvedEmployees = registeredUsers.filter(u => u.role === "EMPLOYEE");
     }
 
     const calculatedStats = getStats(resolvedSessions);
@@ -1175,7 +1192,7 @@ app.post("/api/admin/simulate/brute", requireAdmin, async (req, res) => {
   const userAgent = "Mozilla/5.0 (compatible; BotnetScanner/2.4; +http://recon.net)";
   const username = "recon_bot_" + Math.random().toString(36).substring(2, 6) + "@threat.org";
 
-  const session = await createSession(username, "Deception", ip, userAgent);
+  const session = await createSession(username, "Deception", ip, userAgent, "USER", undefined, true);
   session.failedAttempts = 3;
 
   await addLogEntry(session.id, "Brute Force Threshold Breached", "Repeated failed logins (3 attempts). Silent honeypot diversion activated. [SIMULATION DEMONSTRATION]", 30);

@@ -26,11 +26,14 @@ export interface ISession {
   loginTime?: string;
   lastActivityAt?: string;
   expiresAt?: Date;
-  status: "Genuine" | "Deception";
+  active?: boolean;
+  status: "Genuine" | "Deception" | "Terminated" | "Expired";
+  isSimulation?: boolean;
   threatScore: number;
   failedAttempts: number;
   generatingSummary?: boolean;
   aiSummary?: string;
+  terminatedAt?: string;
   logs: any[];
 }
 
@@ -71,12 +74,15 @@ const sessionSchema = new mongoose.Schema<ISession>({
   userAgent: { type: String, default: "Browser" },
   loginTime: { type: String, default: () => new Date().toISOString() },
   lastActivityAt: { type: String, default: () => new Date().toISOString() },
-  expiresAt: { type: Date },
-  status: { type: String, enum: ["Genuine", "Deception"], required: true },
+  expiresAt: { type: Date, index: true },
+  active: { type: Boolean, default: true, index: true },
+  status: { type: String, enum: ["Genuine", "Deception", "Terminated", "Expired"], default: "Genuine", required: true },
+  isSimulation: { type: Boolean, default: false },
   threatScore: { type: Number, default: 0 },
   failedAttempts: { type: Number, default: 0 },
   generatingSummary: { type: Boolean, default: false },
   aiSummary: { type: String },
+  terminatedAt: { type: String },
   logs: [{
     id: String,
     timestamp: String,

@@ -35,6 +35,9 @@ export function verifyJwtToken(token: string): any {
 
 // In-memory cache synced with MongoDB
 export let sessions: Session[] = [];
+export function setSessions(newSessions: Session[]) {
+  sessions = newSessions;
+}
 export let alerts: Alert[] = [];
 export let registeredUsers: any[] = [];
 export let tasksCache: any[] = [];
@@ -97,19 +100,67 @@ export function broadcastToAdmins(type: string, data: any) {
   });
 }
 
-// Create a new security session with persistent UUID
-export async function createSession(username: string, status: 'Genuine' | 'Deception', ip: string, userAgent: string, role: string = "USER", userId?: string): Promise<Session> {
+// Create a new security session with persistent UUID and active session enforcement
+export async function createSession(
+  username: string, 
+  status: 'Genuine' | 'Deception', 
+  ip: string, 
+  userAgent: string, 
+  role: string = "USER", 
+  userId?: string,
+  isSimulation: boolean = false
+): Promise<Session> {
+  const normalized = username.trim().toLowerCase();
   const uuid = "sess_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
-  const now = new Date().toISOString();
-  
+  const now = new Date();
+  const nowIso = now.toISOString();
+  // Active lifetime: 8 hours max session window
+  const expiresAt = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+
+  // REAL ACTIVE SESSION ENFORCEMENT:
+  // When a real user establishes a new session, terminate any previous active sessions
+  // for that user so multiple historical logins do not duplicate active sessions!
+  if (!isSimulation) {
+    sessions.forEach(s => {
+      if (s.username.toLowerCase() === normalized && s.active !== false && s.status !== "Terminated") {
+        s.active = false;
+        s.status = "Terminated";
+        s.terminatedAt = nowIso;
+      }
+    });
+
+    if (isDbConnected()) {
+      try {
+        await (SessionModel as any).updateMany(
+          { username: normalized, active: true },
+          { 
+            $set: { 
+              active: false, 
+              status: "Terminated", 
+              terminatedAt: nowIso 
+            } 
+          }
+        );
+      } catch (e) {
+        console.error("Error closing previous sessions for user:", e);
+      }
+    }
+  }
+
   const session: Session = {
     id: uuid,
-    username,
+    sessionId: uuid,
+    userId: userId || "",
+    username: normalized,
     role,
     ip: ip || "127.0.0.1",
     userAgent: userAgent || "Browser",
-    loginTime: now,
+    loginTime: nowIso,
+    lastActivityAt: nowIso,
+    expiresAt: expiresAt.toISOString(),
+    active: true,
     status,
+    isSimulation,
     threatScore: status === 'Deception' ? 50 : 0,
     failedAttempts: 0,
     logs: [],
@@ -122,19 +173,22 @@ export async function createSession(username: string, status: 'Genuine' | 'Decep
   // Sync to MongoDB Cloud Atlas
   if (isDbConnected()) {
     try {
-      await SessionModel.create({
+      await (SessionModel as any).create({
         id: session.id,
         sessionId: session.id,
         userId: userId || "",
         username: session.username,
         role: role,
         status: session.status,
+        active: true,
+        isSimulation,
         threatScore: session.threatScore,
         failedAttempts: 0,
         ip: session.ip,
         userAgent: session.userAgent,
         loginTime: session.loginTime,
-        lastActivityAt: now,
+        lastActivityAt: nowIso,
+        expiresAt: expiresAt,
         logs: []
       });
     } catch (e) {
@@ -146,9 +200,9 @@ export async function createSession(username: string, status: 'Genuine' | 'Decep
   await addLogEntry(session.id, 'Session Initiated', `User logged in. Security classification: ${status}.`, status === 'Deception' ? 50 : 0);
 
   if (status === 'Deception') {
-    await createAlert('critical', `Policy Enforcement: Silently diverted traffic for '${username}' into Shadow Deception Zone.`, session.id);
+    await createAlert('critical', `Policy Enforcement: Silently diverted traffic for '${normalized}' into Shadow Deception Zone.`, session.id);
   } else {
-    await createAlert('info', `Legitimate user session established for '${username}'.`, session.id);
+    await createAlert('info', `Legitimate user session established for '${normalized}'.`, session.id);
   }
 
   return session;
@@ -283,18 +337,52 @@ export async function createAlert(type: 'info' | 'warning' | 'critical', message
   return alert;
 }
 
+// Check whether a session is currently active (not terminated, not expired, and not idle > 45m)
+export function isSessionActive(s: any): boolean {
+  if (!s) return false;
+  if (s.active === false) return false;
+  if (s.status === "Terminated" || s.status === "Expired") return false;
+  
+  if (s.expiresAt) {
+    const exp = new Date(s.expiresAt).getTime();
+    if (!isNaN(exp) && exp <= Date.now()) return false;
+  }
+
+  const lastActive = s.lastActivityAt || s.loginTime;
+  if (lastActive) {
+    const diffMs = Date.now() - new Date(lastActive).getTime();
+    if (!isNaN(diffMs) && diffMs > 45 * 60 * 1000) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 // Terminate / end a session
 export async function endSession(sessionId: string) {
-  const index = sessions.findIndex(s => s.id === sessionId);
-  if (index !== -1) {
-    sessions.splice(index, 1);
+  const nowIso = new Date().toISOString();
+  const session = sessions.find(s => s.id === sessionId);
+  if (session) {
+    session.active = false;
+    session.status = "Terminated";
+    session.terminatedAt = nowIso;
   }
 
   if (isDbConnected()) {
     try {
-      await SessionModel.deleteOne({ id: sessionId });
+      await (SessionModel as any).updateOne(
+        { id: sessionId },
+        { 
+          $set: { 
+            active: false, 
+            status: "Terminated", 
+            terminatedAt: nowIso 
+          } 
+        }
+      );
     } catch (e) {
-      console.error("Error deleting session from MongoDB:", e);
+      console.error("Error terminating session in MongoDB:", e);
     }
   }
 
@@ -302,19 +390,19 @@ export async function endSession(sessionId: string) {
   return true;
 }
 
-// Aggregate Dashboard metrics
+// Aggregate Dashboard metrics - computed ONLY from currently active sessions
 export function getStats(sessionList?: Session[]): DashboardStats {
-  const targetSessions = sessionList || sessions;
-  const totalSessions = targetSessions.length;
-  const activeGenuine = targetSessions.filter(s => String(s.status).toLowerCase() === 'genuine').length;
-  const activeDeception = targetSessions.filter(s => String(s.status).toLowerCase() === 'deception').length;
+  const activeOnly = (sessionList || sessions).filter(s => isSessionActive(s));
+  const totalSessions = activeOnly.length;
+  const activeGenuine = activeOnly.filter(s => String(s.status).toLowerCase() === 'genuine').length;
+  const activeDeception = activeOnly.filter(s => String(s.status).toLowerCase() === 'deception').length;
   
-  const totalThreat = targetSessions.reduce((acc, s) => acc + (s.threatScore || 0), 0);
+  const totalThreat = activeOnly.reduce((acc, s) => acc + (s.threatScore || 0), 0);
   const avgThreatScore = totalSessions > 0 ? Math.round(totalThreat / totalSessions) : 0;
 
   // Resource access frequency counting
   const resourceCounts: Record<string, number> = {};
-  targetSessions.forEach(s => {
+  activeOnly.forEach(s => {
     (s.logs || []).forEach(l => {
       if (l.action && (l.action.includes('Viewed Document') || l.action.includes('Reveal Vault Secrets') || l.action.includes('Terminal Command') || l.action.includes('Task') || l.action.includes('Ticket') || l.action.includes('Initiated'))) {
         const key = l.action + ' - ' + (l.details ? l.details.split('.')[0] : '');
@@ -337,7 +425,7 @@ export function getStats(sessionList?: Session[]): DashboardStats {
   };
 }
 
-// Load users, sessions, and alerts from MongoDB on server start
+// Load users, active sessions, and alerts from MongoDB on server start
 export async function loadEmployeesFromDb() {
   if (isDbConnected()) {
     try {
@@ -357,28 +445,43 @@ export async function loadEmployeesFromDb() {
         }));
       }
 
-      // Sessions from MongoDB
-      const dbSessions = await (SessionModel as any).find().lean();
+      // Load ONLY active sessions from MongoDB into active memory
+      const dbSessions = await (SessionModel as any).find({
+        active: true,
+        status: { $in: ["Genuine", "Deception"] }
+      }).lean();
+
       if (dbSessions && dbSessions.length > 0) {
-        sessions = dbSessions.map((s: any) => ({
-          id: s.id || s.sessionId,
-          username: s.username,
-          ip: s.ip || "127.0.0.1",
-          userAgent: s.userAgent || "Browser",
-          loginTime: s.loginTime || new Date().toISOString(),
-          status: (s.status as "Genuine" | "Deception") || "Genuine",
-          threatScore: s.threatScore || 0,
-          failedAttempts: s.failedAttempts || 0,
-          generatingSummary: false,
-          aiSummary: s.aiSummary,
-          logs: (s.logs || []).map((l: any) => ({
-            id: l.id || "log_" + crypto.randomUUID().replace(/-/g, "").substring(0, 8),
-            timestamp: l.timestamp || new Date().toISOString(),
-            action: l.action || "",
-            details: l.details || "",
-            threatPoints: l.threatPoints || 0
-          }))
-        }));
+        sessions = dbSessions
+          .filter((s: any) => isSessionActive(s))
+          .map((s: any) => ({
+            id: s.id || s.sessionId,
+            sessionId: s.sessionId || s.id,
+            userId: s.userId || "",
+            username: s.username,
+            role: s.role || "USER",
+            ip: s.ip || "127.0.0.1",
+            userAgent: s.userAgent || "Browser",
+            loginTime: s.loginTime || new Date().toISOString(),
+            lastActivityAt: s.lastActivityAt || s.loginTime,
+            expiresAt: s.expiresAt ? new Date(s.expiresAt).toISOString() : undefined,
+            active: s.active !== false,
+            status: (s.status as any) || "Genuine",
+            isSimulation: Boolean(s.isSimulation),
+            threatScore: s.threatScore || 0,
+            failedAttempts: s.failedAttempts || 0,
+            generatingSummary: false,
+            aiSummary: s.aiSummary,
+            logs: (s.logs || []).map((l: any) => ({
+              id: l.id || "log_" + crypto.randomUUID().replace(/-/g, "").substring(0, 8),
+              timestamp: l.timestamp || new Date().toISOString(),
+              action: l.action || "",
+              details: l.details || "",
+              threatPoints: l.threatPoints || 0
+            }))
+          }));
+      } else {
+        sessions = [];
       }
 
       // Alerts from MongoDB
@@ -395,7 +498,7 @@ export async function loadEmployeesFromDb() {
 
       const userCount = await (UserModel as any).countDocuments();
       await loadPoliciesFromDb();
-      console.log(`✅ MongoDB Synced: Loaded ${userCount} persistent users, ${sessions.length} sessions, ${alerts.length} alerts, and ${policiesCache.length} policies.`);
+      console.log(`✅ MongoDB Synced: Loaded ${userCount} persistent users, ${sessions.length} active sessions, ${alerts.length} alerts, and ${policiesCache.length} policies.`);
     } catch (e) {
       console.error("Error loading state from MongoDB:", e);
     }
@@ -567,39 +670,6 @@ export async function getEmployeeData(username: string) {
     tasks = tasksCache.filter(t => t.username === normalized);
     projects = projectsCache.filter(p => p.username === normalized);
     tickets = ticketsCache.filter(tk => tk.username === normalized);
-  }
-
-  // Seed default initial tasks if user has none
-  if (tasks.length === 0) {
-    const initialTasks = [
-      { id: "task_101", username: normalized, title: "Review quarterly IT security compliance report", completed: true, createdAt: new Date().toISOString() },
-      { id: "task_102", username: normalized, title: "Approve server maintenance window for Rack 4", completed: false, createdAt: new Date().toISOString() },
-      { id: "task_103", username: normalized, title: "Submit annual employee performance self-appraisal", completed: false, createdAt: new Date().toISOString() },
-      { id: "task_104", username: normalized, title: "Complete mandatory zero-trust security refresher course", completed: true, createdAt: new Date().toISOString() }
-    ];
-    for (const t of initialTasks) {
-      tasksCache.push(t);
-      if (isDbConnected()) {
-        await (TaskModel as any).create(t).catch(() => {});
-      }
-    }
-    tasks = initialTasks;
-  }
-
-  // Seed default initial projects if user has none
-  if (projects.length === 0) {
-    const initialProjects = [
-      { id: "prj_901", code: "PRJ-901", name: "Campus Network Infrastructure Upgrade", schedule: "Deadline: Aug 15", status: "Active", username: normalized, createdAt: new Date().toISOString() },
-      { id: "prj_882", code: "PRJ-882", name: "Employee Directory & SSO Modernization", schedule: "Deadline: Sep 01", status: "Active", username: normalized, createdAt: new Date().toISOString() },
-      { id: "prj_750", code: "PRJ-750", name: "Institutional Data Backup & DR Sync", schedule: "Deadline: Oct 10", status: "Pending Review", username: normalized, createdAt: new Date().toISOString() }
-    ];
-    for (const p of initialProjects) {
-      projectsCache.push(p);
-      if (isDbConnected()) {
-        await (ProjectModel as any).create(p).catch(() => {});
-      }
-    }
-    projects = initialProjects;
   }
 
   return { tasks, projects, tickets };
