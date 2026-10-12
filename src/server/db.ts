@@ -256,10 +256,13 @@ mongoose.connection.on("error", () => {
   if (cached) cached.promise = null;
 });
 
+export let lastConnectionError: string | null = null;
+
 export async function connectMongoDB(): Promise<boolean> {
   const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
 
   if (!uri || uri.includes("YOUR_MONGODB_URI") || uri.includes("placeholder")) {
+    lastConnectionError = "MONGODB_URI not set or is placeholder";
     console.warn("⚠️ MONGODB_URI environment variable not set or invalid. Running with in-memory persistence mode.");
     return false;
   }
@@ -272,7 +275,8 @@ export async function connectMongoDB(): Promise<boolean> {
   if (cached?.promise) {
     try {
       return await cached.promise;
-    } catch {
+    } catch (e: any) {
+      lastConnectionError = e.message || String(e);
       cached.promise = null;
     }
   }
@@ -289,13 +293,15 @@ export async function connectMongoDB(): Promise<boolean> {
       });
       isConnected = true;
       cached!.conn = mongoose;
+      lastConnectionError = null;
       console.log("✅ Successfully connected to MongoDB Cloud Database!");
 
       bootstrapInitialAdmin().catch(() => {});
 
       return true;
     } catch (err: any) {
-      console.error("❌ Failed to connect to MongoDB Cloud Database:", err.message || err);
+      lastConnectionError = err.message || String(err);
+      console.error("❌ Failed to connect to MongoDB Cloud Database:", lastConnectionError);
       isConnected = false;
       cached!.promise = null;
       return false;

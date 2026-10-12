@@ -38,7 +38,7 @@ import {
   deployNewPolicy
 } from "./src/server/store.js";
 import { generateAttackerSummary } from "./src/server/gemini.js";
-import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, PolicyModel, AuditEventModel, isDbConnected } from "./src/server/db.js";
+import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, PolicyModel, AuditEventModel, isDbConnected, lastConnectionError } from "./src/server/db.js";
 
 const getFilename = () => {
   try {
@@ -86,19 +86,15 @@ app.use(async (req, res, next) => {
 
 // Production Health & Environment Presence Verification Endpoint (Zero Secrets Exposed)
 app.get("/api/health", async (req, res) => {
-  let dbErr: string | null = null;
   if (!isDbConnected()) {
     try {
-      const ok = await connectMongoDB();
-      if (!ok) dbErr = "connectMongoDB returned false";
-    } catch (e: any) {
-      dbErr = e.message || String(e);
-    }
+      await connectMongoDB();
+    } catch (e: any) {}
   }
   res.json({
     status: "healthy",
     dbConnected: isDbConnected(),
-    dbError: dbErr,
+    dbError: lastConnectionError,
     environmentPresence: {
       MONGODB_URI: !!(process.env.MONGODB_URI || process.env.MONGO_URI),
       ADMIN_USERNAME: !!process.env.ADMIN_USERNAME,
