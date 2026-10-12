@@ -84,6 +84,23 @@ app.use(async (req, res, next) => {
   next();
 });
 
+// Production Health & Environment Presence Verification Endpoint (Zero Secrets Exposed)
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "healthy",
+    deployedCommit: "e866b46",
+    environmentPresence: {
+      MONGODB_URI: !!(process.env.MONGODB_URI || process.env.MONGO_URI),
+      ADMIN_USERNAME: !!process.env.ADMIN_USERNAME,
+      ADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD,
+      ADMIN_PASSWORD_HASH: !!process.env.ADMIN_PASSWORD_HASH,
+      JWT_SECRET: !!process.env.JWT_SECRET,
+      SESSION_SECRET: !!process.env.SESSION_SECRET,
+      dbConnected: isDbConnected()
+    }
+  });
+});
+
 // Helper function to find a session across serverless function instances & memory cache
 export async function findSession(sessionId: string): Promise<any> {
   if (!sessionId) return null;
