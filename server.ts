@@ -85,18 +85,27 @@ app.use(async (req, res, next) => {
 });
 
 // Production Health & Environment Presence Verification Endpoint (Zero Secrets Exposed)
-app.get("/api/health", (req, res) => {
+app.get("/api/health", async (req, res) => {
+  let dbErr: string | null = null;
+  if (!isDbConnected()) {
+    try {
+      const ok = await connectMongoDB();
+      if (!ok) dbErr = "connectMongoDB returned false";
+    } catch (e: any) {
+      dbErr = e.message || String(e);
+    }
+  }
   res.json({
     status: "healthy",
-    deployedCommit: "e866b46",
+    dbConnected: isDbConnected(),
+    dbError: dbErr,
     environmentPresence: {
       MONGODB_URI: !!(process.env.MONGODB_URI || process.env.MONGO_URI),
       ADMIN_USERNAME: !!process.env.ADMIN_USERNAME,
       ADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD,
       ADMIN_PASSWORD_HASH: !!process.env.ADMIN_PASSWORD_HASH,
       JWT_SECRET: !!process.env.JWT_SECRET,
-      SESSION_SECRET: !!process.env.SESSION_SECRET,
-      dbConnected: isDbConnected()
+      SESSION_SECRET: !!process.env.SESSION_SECRET
     }
   });
 });
