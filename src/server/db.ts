@@ -260,11 +260,15 @@ export let lastConnectionError: string | null = null;
 
 export async function connectMongoDB(): Promise<boolean> {
   const rawUri = (process.env.MONGODB_URI || process.env.MONGO_URI || "").trim();
-  const uri = rawUri.replace(/^["']/, "").replace(/["']$/, "").trim();
+  let uri = rawUri.replace(/^["']/, "").replace(/["']$/, "").trim();
+  const match = rawUri.match(/(mongodb(?:\+srv)?:\/\/[^\s"']+)/);
+  if (match) {
+    uri = match[1];
+  }
 
-  if (!uri || uri.includes("YOUR_MONGODB_URI") || uri.includes("placeholder")) {
-    lastConnectionError = "MONGODB_URI not set or is placeholder";
-    console.warn("⚠️ MONGODB_URI environment variable not set or invalid. Running with in-memory persistence mode.");
+  if (!uri || (!uri.startsWith("mongodb://") && !uri.startsWith("mongodb+srv://"))) {
+    lastConnectionError = "MONGODB_URI not set or missing valid mongodb:// / mongodb+srv:// scheme";
+    console.warn("⚠️ MONGODB_URI environment variable not set or invalid scheme.");
     return false;
   }
 
