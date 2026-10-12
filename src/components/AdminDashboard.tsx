@@ -168,6 +168,10 @@ export default function AdminDashboard() {
   const [securityPolicies, setSecurityPolicies] = useState<SecurityPolicy[]>([]);
   const [deployingPolicy, setDeployingPolicy] = useState(false);
   const [deploySuccess, setDeploySuccess] = useState<string | null>(null);
+  const [connectionWarning, setConnectionWarning] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const pollRequestIdRef = useRef(0);
+  const lastSuccessTimestampRef = useRef(0);
 
   // MongoDB Historical Session Search & Filter state
   const [sessionSearch, setSessionSearch] = useState("");
@@ -291,47 +295,90 @@ export default function AdminDashboard() {
         if (parsed?.id) sessId = parsed.id;
       } catch (e) {}
     }
-    return { "x-session-id": sessId, "Content-Type": "application/json" };
+    const token = localStorage.getItem("jwt_token") || "";
+    return {
+      "x-session-id": sessId,
+      "Content-Type": "application/json",
+      ...(token ? { "Authorization": `Bearer ${token}` } : {})
+    };
   };
 
-  // Load Initial Datasets & Multi-Device State Sync
-  const fetchAllData = async () => {
+  // Load Initial Datasets & Multi-Device State Sync with Stale-Response Rejection & Error Tolerance
+  const fetchAllData = async (manual = false) => {
+    if (manual) setIsRefreshing(true);
+    const reqId = ++pollRequestIdRef.current;
     try {
       const headers = getAdminHeaders();
-      const [pollRes] = await Promise.all([
-        fetch("/api/admin/events-poll", { headers })
-      ]);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+      const pollRes = await fetch("/api/admin/events-poll", {
+        headers,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      // Discard response if a newer poll request was dispatched
+      if (reqId !== pollRequestIdRef.current) return;
+
+      if (!pollRes.ok) {
+        // Non-2xx response (e.g. 503 during cold-start or DB reconnection)
+        // PRESERVE last known good state! Never overwrite valid state with empty arrays!
+        setConnectionWarning(`Reconnecting to telemetry gateway (HTTP ${pollRes.status}). Retaining active telemetry state.`);
+        return;
+      }
 
       const pollData = await pollRes.json();
+      if (reqId !== pollRequestIdRef.current) return;
 
       if (pollData.status === "success") {
+        // Discard stale response if timestamp is older than last processed successful response
+        if (pollData.timestamp && pollData.timestamp < lastSuccessTimestampRef.current) {
+          return;
+        }
+        if (pollData.timestamp) {
+          lastSuccessTimestampRef.current = pollData.timestamp;
+        }
+        setConnectionWarning(null);
+
         const fetchedSessions: Session[] = pollData.sessions || [];
         if (fetchedSessions.length > 0) {
-          setActiveSessions(prev => {
-            const map = new Map(prev.map(s => [s.id, s]));
-            fetchedSessions.forEach(fs => map.set(fs.id, fs));
-            return Array.from(map.values());
-          });
-        } else if (pollData.sessions) {
+          setActiveSessions(fetchedSessions);
+        } else if (Array.isArray(pollData.sessions)) {
           setActiveSessions(pollData.sessions);
         }
 
-        if (pollData.alerts) setAlertsList(pollData.alerts);
+        if (Array.isArray(pollData.alerts)) setAlertsList(pollData.alerts);
         if (pollData.stats) setStats(pollData.stats);
-        if (pollData.employees) setEmployeesList(pollData.employees);
-        if (pollData.policies) setSecurityPolicies(pollData.policies);
+        if (Array.isArray(pollData.employees)) setEmployeesList(pollData.employees);
+        if (Array.isArray(pollData.policies)) setSecurityPolicies(pollData.policies);
         
         setSelectedSessionId(currentId => {
+          // Keep current selection if session is still active
+          if (currentId && fetchedSessions.some(s => s.id === currentId)) {
+            return currentId;
+          }
+          // Default to first active session if none selected
           if (!currentId && fetchedSessions.length > 0) {
+            return fetchedSessions[0].id;
+          }
+          // If current selection genuinely ended, switch to first available session
+          if (currentId && !fetchedSessions.some(s => s.id === currentId) && fetchedSessions.length > 0) {
             return fetchedSessions[0].id;
           }
           return currentId;
         });
+      } else {
+        setConnectionWarning(pollData.message || "Telemetry gateway returned non-success. Retaining last state.");
       }
-    } catch (err) {
-      console.error("Failed to fetch initial admin data", err);
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        console.warn("Telemetry polling transient connection warning:", err);
+      }
+      setConnectionWarning("Transient gateway synchronization delay. Retaining active telemetry state.");
     } finally {
       setLoading(false);
+      if (manual) setIsRefreshing(false);
     }
   };
 
@@ -551,14 +598,28 @@ export default function AdminDashboard() {
   };
 
   const handleEndSession = async (sessionId: string) => {
+    if (!window.confirm(`Are you sure you want to terminate session ${sessionId}? This will revoke access and log an audit trail.`)) {
+      return;
+    }
     try {
-      await fetch("/api/auth/logout", {
+      const token = localStorage.getItem("jwt_token") || "";
+      const res = await fetch("/api/auth/logout", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-session-id": sessionId,
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+        },
         body: JSON.stringify({ sessionId })
       });
+      const data = await res.json();
+      if (data.status === "success") {
+        setActiveSessions(prev => prev.filter(s => s.id !== sessionId));
+        setSelectedSessionId(currentId => (currentId === sessionId ? null : currentId));
+        fetchAllData(true);
+      }
     } catch (e) {
-      console.error(e);
+      console.error("Session termination error:", e);
     }
   };
 
@@ -628,14 +689,31 @@ export default function AdminDashboard() {
           </button>
 
           <button
-            onClick={fetchAllData}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-xs font-bold rounded-lg border border-slate-300 transition-colors cursor-pointer text-slate-700 shadow-xs"
+            onClick={() => fetchAllData(true)}
+            disabled={isRefreshing}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-xs font-bold rounded-lg border border-slate-300 transition-colors cursor-pointer text-slate-700 shadow-xs disabled:opacity-60"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin text-blue-600" : ""}`} />
             Refresh Data
           </button>
         </div>
       </div>
+
+      {/* Non-destructive connection notice banner during transient serverless cold-starts */}
+      {connectionWarning && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs px-4 py-2.5 rounded-xl flex items-center justify-between shadow-xs animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>{connectionWarning}</span>
+          </div>
+          <button
+            onClick={() => fetchAllData(true)}
+            className="text-[11px] underline font-semibold hover:text-amber-900 cursor-pointer"
+          >
+            Retry Sync
+          </button>
+        </div>
+      )}
 
       {/* Analytics Bento Grid Widgets */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" id="admin-bento-metrics">

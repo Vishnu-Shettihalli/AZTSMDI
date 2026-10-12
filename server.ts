@@ -5,6 +5,7 @@ import express from "express";
 import helmet from "helmet";
 import bcrypt from "bcryptjs";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import {
   sessions,
@@ -63,46 +64,29 @@ const __dirname = getDirname();
 export const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
 
-// Lazy database connection middleware for Vercel Serverless Function invocations
-let dbConnectionPromise: Promise<boolean> | null = null;
-app.use(async (req, res, next) => {
-  if (!isDbConnected() && process.env.MONGODB_URI) {
-    if (!dbConnectionPromise) {
-      dbConnectionPromise = Promise.race([
-        connectMongoDB().then(async (success) => {
-          if (success) loadEmployeesFromDb().catch(() => {});
-          return success;
-        }),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 4500))
-      ]).catch(err => {
-        console.error("MongoDB serverless connect error:", err);
-        return false;
-      });
-    }
-    try {
-      const ok = await dbConnectionPromise;
-      if (!ok) {
-        dbConnectionPromise = null;
-      }
-    } catch (e) {
-      console.error("Serverless DB connection error caught:", e);
-      dbConnectionPromise = null;
-    }
-  }
-  next();
-});
-
 // Apply Security Headers (Helmet) without breaking Vite/React inline assets
 app.use(helmet({ contentSecurityPolicy: false }));
 
 // Middleware for parsing JSON requests
 app.use(express.json());
 
+// Lazy database connection middleware for Vercel Serverless Function invocations
+app.use(async (req, res, next) => {
+  if (process.env.MONGODB_URI && !isDbConnected()) {
+    try {
+      await connectMongoDB();
+      await loadEmployeesFromDb().catch(() => {});
+    } catch (e) {
+      console.warn("MongoDB connection attempt error in middleware:", e);
+    }
+  }
+  next();
+});
+
 // Helper function to find a session across serverless function instances & memory cache
 export async function findSession(sessionId: string): Promise<any> {
   if (!sessionId) return null;
   let session = sessions.find(s => s.id === sessionId);
-  if (session) return session;
 
   if (isDbConnected()) {
     try {
@@ -122,7 +106,12 @@ export async function findSession(sessionId: string): Promise<any> {
           generatingSummary: dbSess.generatingSummary || false,
           aiSummary: dbSess.aiSummary
         };
-        sessions.unshift(formattedSession);
+        const idx = sessions.findIndex(s => s.id === formattedSession.id);
+        if (idx === -1) {
+          sessions.unshift(formattedSession);
+        } else {
+          sessions[idx] = formattedSession;
+        }
         return formattedSession;
       }
     } catch (e) {
@@ -130,561 +119,582 @@ export async function findSession(sessionId: string): Promise<any> {
     }
   }
 
-  return null;
+  return session || null;
 }
 
-async function startServer() {
-  // Connect to MongoDB Atlas & bootstrap initial admin on standalone startup
-  await connectMongoDB();
-  await loadEmployeesFromDb();
+// Helper middleware for Admin Authorization
+export const requireAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const authHeader = (req.headers["authorization"] as string) || "";
+  const rawToken = authHeader.replace("Bearer ", "").trim();
+  const sessionId = (req.headers["x-session-id"] as string) || 
+                    rawToken || 
+                    (req.query.sessionId as string) || 
+                    req.body?.sessionId;
 
-  // Helper middleware for Admin Authorization
-  const requireAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const authHeader = (req.headers["authorization"] as string) || "";
-    const rawToken = authHeader.replace("Bearer ", "").trim();
-    const sessionId = (req.headers["x-session-id"] as string) || 
-                      rawToken || 
-                      (req.query.sessionId as string) || 
-                      req.body?.sessionId;
+  // Allow requests from Admin Dashboard context
+  if (!sessionId || sessionId === "admin_session" || sessionId === "admin") {
+    return next();
+  }
 
-    // Allow requests from Admin Dashboard context
-    if (!sessionId || sessionId === "admin_session" || sessionId === "admin") {
+  // Verify JWT payload directly
+  const jwtPayload = verifyJwtToken(authHeader || rawToken);
+  if (jwtPayload && (String(jwtPayload.role || "").toUpperCase() === "ADMIN" || String(jwtPayload.username || "").toLowerCase().includes("admin"))) {
+    return next();
+  }
+
+  if (!isDbConnected() && process.env.MONGODB_URI) {
+    try {
+      await connectMongoDB();
+    } catch (e) {}
+  }
+
+  const targetSessionId = jwtPayload?.sessionId || sessionId;
+  const session = await findSession(targetSessionId);
+  if (session) {
+    const sessRole = String(session.role || "").toUpperCase();
+    if (sessRole === "ADMIN" || session.username?.toLowerCase().includes("admin")) {
       return next();
     }
-
-    // Verify JWT payload directly
-    const jwtPayload = verifyJwtToken(authHeader || rawToken);
-    if (jwtPayload && (String(jwtPayload.role || "").toUpperCase() === "ADMIN" || String(jwtPayload.username || "").toLowerCase().includes("admin"))) {
-      return next();
-    }
-
-    if (!isDbConnected() && process.env.MONGODB_URI) {
-      try {
-        await connectMongoDB();
-      } catch (e) {}
-    }
-
-    const targetSessionId = jwtPayload?.sessionId || sessionId;
-    const session = await findSession(targetSessionId);
-    if (session) {
-      const sessRole = String(session.role || "").toUpperCase();
-      if (sessRole === "ADMIN" || session.username?.toLowerCase().includes("admin")) {
+    if (isDbConnected() && session.username) {
+      const dbUser = await (UserModel as any).findOne({ username: session.username.toLowerCase() }).lean();
+      if (dbUser && String(dbUser.role || "").toUpperCase() === "ADMIN") {
         return next();
       }
-      if (isDbConnected() && session.username) {
-        const dbUser = await (UserModel as any).findOne({ username: session.username.toLowerCase() }).lean();
-        if (dbUser && String(dbUser.role || "").toUpperCase() === "ADMIN") {
+    }
+  }
+
+  // Direct token or session validation against DB
+  if (isDbConnected()) {
+    try {
+      const dbSess = await (SessionModel as any).findOne({ id: targetSessionId }).lean();
+      if (dbSess) {
+        const dbRole = String(dbSess.role || "").toUpperCase();
+        if (dbRole === "ADMIN") {
           return next();
         }
-      }
-    }
-
-    // Direct token or session validation against DB
-    if (isDbConnected()) {
-      try {
-        const dbSess = await (SessionModel as any).findOne({ id: targetSessionId }).lean();
-        if (dbSess) {
-          const dbRole = String(dbSess.role || "").toUpperCase();
-          if (dbRole === "ADMIN") {
+        if (dbSess.username) {
+          const dbUser = await (UserModel as any).findOne({ username: dbSess.username.toLowerCase() }).lean();
+          if (dbUser && String(dbUser.role || "").toUpperCase() === "ADMIN") {
             return next();
           }
-          if (dbSess.username) {
-            const dbUser = await (UserModel as any).findOne({ username: dbSess.username.toLowerCase() }).lean();
-            if (dbUser && String(dbUser.role || "").toUpperCase() === "ADMIN") {
-              return next();
-            }
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Fallback: if caller is logged into Admin UI with active session UUID
+  if (targetSessionId && targetSessionId.startsWith("sess_")) {
+    return next();
+  }
+
+  return res.status(403).json({ status: "error", message: "Admin authorization required." });
+};
+
+// ==========================================
+// INTELLIGENT API GATEWAY SECURITY MIDDLEWARE
+// ==========================================
+
+export const intelligentApiGateway = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!req.path.startsWith("/api/") || req.path.startsWith("/api/auth/")) {
+    return next();
+  }
+
+  const authHeader = (req.headers["authorization"] as string) || "";
+  const rawToken = authHeader.replace("Bearer ", "").trim();
+  let sessionIdHeader = (req.headers["x-session-id"] as string) || (req.query.sessionId as string) || req.body?.sessionId;
+
+  // Extract session ID from URL path if not explicitly passed in headers or body
+  if (!sessionIdHeader) {
+    const match = req.path.match(/(sess_[a-zA-Z0-9_-]+)/);
+    if (match) {
+      sessionIdHeader = match[1];
+    }
+  }
+
+  const jwtPayload = verifyJwtToken(authHeader || rawToken);
+  let targetSessionId = jwtPayload?.sessionId || sessionIdHeader || rawToken;
+  let session = targetSessionId ? await findSession(targetSessionId) : null;
+
+  // Reject tampered/invalid Bearer JWT tokens on protected endpoints
+  if (authHeader.startsWith("Bearer ") && !jwtPayload && !session && !targetSessionId?.startsWith("sess_") && targetSessionId !== "admin_session" && targetSessionId !== "admin") {
+    return res.status(401).json({ status: "error", message: "Invalid, tampered, or expired JWT Token signature." });
+  }
+
+  const role = (jwtPayload?.role || session?.role || "USER").toUpperCase();
+  const status = session?.status || jwtPayload?.status || "Genuine";
+
+  const isEmployeeRoute = req.path.startsWith("/api/employee") || req.path.startsWith("/api/real");
+  const isDeceptionRoute = req.path.startsWith("/api/deception");
+  const isAdminRoute = req.path.startsWith("/api/admin");
+
+  // Deception session isolation: DECEPTION sessions CANNOT access Admin or Employee endpoints
+  if (status === "Deception" && (isAdminRoute || isEmployeeRoute)) {
+    return res.status(403).json({ status: "error", message: "Access Denied: Session restricted to Aegis Deception Environment." });
+  }
+
+  // Role isolation: Non-admin EMPLOYEE sessions CANNOT access Admin endpoints
+  if (role === "EMPLOYEE" && isAdminRoute) {
+    return res.status(403).json({ status: "error", message: "Access Denied: Admin authorization required." });
+  }
+
+  // Genuine Employee sessions CANNOT access Deception endpoints
+  if (status === "Genuine" && role !== "ADMIN" && isDeceptionRoute) {
+    return res.status(403).json({ status: "error", message: "Access Denied: Deception environment is inaccessible to legitimate employee profiles." });
+  }
+
+  // Dynamic Closed-Loop Policy Gateway Enforcement
+  const activePolicies = await getActivePolicies();
+  for (const policy of activePolicies) {
+    if (policy.action === "DECEPTION" && session && session.threatScore >= policy.threshold && session.status !== "Deception") {
+      session.status = "Deception";
+      if (isDbConnected()) {
+        await SessionModel.updateOne({ id: session.id }, { $set: { status: "Deception" } }).catch(() => {});
+      }
+      await createAlert("critical", `CLOSED-LOOP GATEWAY POLICY ENFORCED: Session '${session.id}' threat score ${session.threatScore} reached threshold ${policy.threshold}. Diverted to Deception Zone.`, session.id);
+    }
+  }
+
+  // Record Audit Event in MongoDB
+  if (isDbConnected() && session) {
+    AuditEventModel.create({
+      id: "audit_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10),
+      timestamp: new Date().toISOString(),
+      sessionId: session.id,
+      username: session.username,
+      role: role,
+      action: `API Request: ${req.method} ${req.path}`,
+      endpoint: req.path,
+      method: req.method,
+      status: 200,
+      threatScore: session.threatScore || 0,
+      decision: session.status === "Deception" ? "DECEPTION" : "ALLOW"
+    }).catch(() => {});
+  }
+
+  next();
+};
+
+app.use(intelligentApiGateway);
+
+// ==========================================
+// AUTHENTICATION ENDPOINTS
+// ==========================================
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
+    const userAgent = (req.headers["user-agent"] as string) || "Unknown User Agent";
+
+    if (!username) {
+      return res.status(400).json({ status: "error", message: "Email or username is required." });
+    }
+
+    const normalized = username.trim().toLowerCase();
+    const cleanPassword = (password || "").trim();
+
+    // 1. Authenticate against persistent MongoDB UserModel
+    let authenticatedUser: any = null;
+
+    if (isDbConnected()) {
+      try {
+        const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
+        if (dbUser && dbUser.passwordHash) {
+          if (bcrypt.compareSync(cleanPassword, dbUser.passwordHash) || bcrypt.compareSync(password || "", dbUser.passwordHash)) {
+            authenticatedUser = dbUser;
           }
         }
       } catch (e) {}
     }
 
-    // Fallback: if caller is logged into Admin UI with active session UUID
-    if (targetSessionId.startsWith("sess_")) {
-      return next();
-    }
-
-    return res.status(403).json({ status: "error", message: "Admin authorization required." });
-  };
-
-  // ==========================================
-  // INTELLIGENT API GATEWAY SECURITY MIDDLEWARE
-  // ==========================================
-
-  const intelligentApiGateway = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    if (!req.path.startsWith("/api/") || req.path.startsWith("/api/auth/")) {
-      return next();
-    }
-
-    const authHeader = (req.headers["authorization"] as string) || "";
-    const rawToken = authHeader.replace("Bearer ", "").trim();
-    const sessionIdHeader = (req.headers["x-session-id"] as string) || (req.query.sessionId as string) || req.body?.sessionId;
-
-    const jwtPayload = verifyJwtToken(authHeader || rawToken);
-    let targetSessionId = jwtPayload?.sessionId || sessionIdHeader || rawToken;
-    let session = targetSessionId ? await findSession(targetSessionId) : null;
-
-    // Reject tampered/invalid Bearer JWT tokens on protected endpoints
-    if (authHeader.startsWith("Bearer ") && !jwtPayload && !session && !targetSessionId?.startsWith("sess_") && targetSessionId !== "admin_session" && targetSessionId !== "admin") {
-      return res.status(401).json({ status: "error", message: "Invalid, tampered, or expired JWT Token signature." });
-    }
-
-    const role = (jwtPayload?.role || session?.role || "USER").toUpperCase();
-    const status = session?.status || jwtPayload?.status || "Genuine";
-
-    const isEmployeeRoute = req.path.startsWith("/api/employee") || req.path.startsWith("/api/real");
-    const isDeceptionRoute = req.path.startsWith("/api/deception");
-    const isAdminRoute = req.path.startsWith("/api/admin");
-
-    // Deception session isolation: DECEPTION sessions CANNOT access Admin or Employee endpoints
-    if (status === "Deception" && (isAdminRoute || isEmployeeRoute)) {
-      return res.status(403).json({ status: "error", message: "Access Denied: Session restricted to Aegis Deception Environment." });
-    }
-
-    // Role isolation: Non-admin EMPLOYEE sessions CANNOT access Admin endpoints
-    if (role === "EMPLOYEE" && isAdminRoute) {
-      return res.status(403).json({ status: "error", message: "Access Denied: Admin authorization required." });
-    }
-
-    // Genuine Employee sessions CANNOT access Deception endpoints
-    if (status === "Genuine" && role !== "ADMIN" && isDeceptionRoute) {
-      return res.status(403).json({ status: "error", message: "Access Denied: Deception environment is inaccessible to legitimate employee profiles." });
-    }
-
-    // Dynamic Closed-Loop Policy Gateway Enforcement
-    const activePolicies = await getActivePolicies();
-    for (const policy of activePolicies) {
-      if (policy.action === "DECEPTION" && session && session.threatScore >= policy.threshold && session.status !== "Deception") {
-        session.status = "Deception";
-        createAlert("critical", `CLOSED-LOOP GATEWAY POLICY ENFORCED: Session '${session.id}' threat score ${session.threatScore} reached threshold ${policy.threshold}. Diverted to Deception Zone.`, session.id);
+    if (!authenticatedUser) {
+      const memUser = registeredUsers.find(u => u.username === normalized && u.active);
+      if (memUser && memUser.passwordHash) {
+        if (bcrypt.compareSync(cleanPassword, memUser.passwordHash) || bcrypt.compareSync(password || "", memUser.passwordHash)) {
+          authenticatedUser = memUser;
+        }
       }
     }
 
-    // Record Audit Event in MongoDB
-    if (isDbConnected() && session) {
-      AuditEventModel.create({
-        id: "audit_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10),
-        timestamp: new Date().toISOString(),
+    if (authenticatedUser) {
+      // Successful real employee authentication
+      delete loginFailures[normalized];
+      if (isDbConnected()) {
+        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+      }
+      const sessionRole = authenticatedUser.role === "ADMIN" ? "ADMIN" : "USER";
+      const session = await createSession(authenticatedUser.username, "Genuine", ip, userAgent, sessionRole, authenticatedUser.id);
+      const token = generateJwtToken({
+        userId: authenticatedUser.id || session.id,
+        username: authenticatedUser.username,
+        role: sessionRole,
         sessionId: session.id,
-        username: session.username,
-        role: role,
-        action: `API Request: ${req.method} ${req.path}`,
-        endpoint: req.path,
-        method: req.method,
-        status: 200,
-        threatScore: session.threatScore || 0,
-        decision: session.status === "Deception" ? "DECEPTION" : "ALLOW"
-      }).catch(() => {});
+        status: "Genuine"
+      });
+      return res.json({ 
+        status: "success", 
+        token,
+        session,
+        role: authenticatedUser.role === "ADMIN" ? "admin" : "user"
+      });
     }
 
-    next();
-  };
-
-  app.use(intelligentApiGateway);
-
-  // ==========================================
-  // AUTHENTICATION ENDPOINTS
-  // ==========================================
-
-  app.post("/api/auth/login", async (req, res) => {
-    try {
-      const { username, password } = req.body;
-      const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
-      const userAgent = req.headers["user-agent"] || "Unknown User Agent";
-
-      if (!username) {
-        return res.status(400).json({ status: "error", message: "Email or username is required." });
-      }
-
-      const normalized = username.trim().toLowerCase();
-      const cleanPassword = (password || "").trim();
-
-      // 1. Authenticate against persistent MongoDB UserModel
-      let authenticatedUser: any = null;
-
-      if (isDbConnected()) {
-        try {
-          const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
-          if (dbUser && dbUser.passwordHash) {
-            if (bcrypt.compareSync(cleanPassword, dbUser.passwordHash) || bcrypt.compareSync(password || "", dbUser.passwordHash)) {
-              authenticatedUser = dbUser;
-            }
-          }
-        } catch (e) {}
-      }
-
-      if (!authenticatedUser) {
-        const memUser = registeredUsers.find(u => u.username === normalized && u.active);
-        if (memUser && memUser.passwordHash) {
-          if (bcrypt.compareSync(cleanPassword, memUser.passwordHash) || bcrypt.compareSync(password || "", memUser.passwordHash)) {
-            authenticatedUser = memUser;
-          }
-        }
-      }
-
-      if (authenticatedUser) {
-        // Successful real employee authentication
-        delete loginFailures[normalized];
-        if (isDbConnected()) {
-          await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
-        }
-        const sessionRole = authenticatedUser.role === "ADMIN" ? "ADMIN" : "USER";
-        const session = createSession(authenticatedUser.username, "Genuine", ip, userAgent, sessionRole, authenticatedUser.id);
-        const token = generateJwtToken({
-          userId: authenticatedUser.id || session.id,
-          username: authenticatedUser.username,
-          role: sessionRole,
-          sessionId: session.id,
-          status: "Genuine"
-        });
-        return res.json({ 
-          status: "success", 
-          token,
-          session,
-          role: authenticatedUser.role === "ADMIN" ? "admin" : "user"
-        });
-      }
-
-      // 3. Brute force / failed login threshold calculation
-      let failCount = 0;
-      if (isDbConnected()) {
-        try {
-          const existing = await (LoginFailureModel as any).findOne({ username: normalized }).lean();
-          failCount = existing ? (existing.count || 0) + 1 : 1;
-          await (LoginFailureModel as any).updateOne(
-            { username: normalized },
-            { $set: { count: failCount, lastAttempt: new Date().toISOString() } },
-            { upsert: true }
-          );
-        } catch (err) {
-          console.error("Error tracking login failure in DB:", err);
-          const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
-          failures.count += 1;
-          failures.lastAttempt = Date.now();
-          loginFailures[normalized] = failures;
-          failCount = failures.count;
-        }
-      } else {
+    // 3. Brute force / failed login threshold calculation
+    let failCount = 0;
+    if (isDbConnected()) {
+      try {
+        const existing = await (LoginFailureModel as any).findOne({ username: normalized }).lean();
+        failCount = existing ? (existing.count || 0) + 1 : 1;
+        await (LoginFailureModel as any).updateOne(
+          { username: normalized },
+          { $set: { count: failCount, lastAttempt: new Date().toISOString() } },
+          { upsert: true }
+        );
+      } catch (err) {
+        console.error("Error tracking login failure in DB:", err);
         const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
         failures.count += 1;
         failures.lastAttempt = Date.now();
         loginFailures[normalized] = failures;
         failCount = failures.count;
       }
-
-      if (failCount >= 3) {
-        // 3rd failure threshold breached: silently redirect attacker to Shadow Service (Honeypot)
-        if (isDbConnected()) {
-          await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
-        }
-        delete loginFailures[normalized];
-
-        const session = createSession(normalized, "Deception", ip, userAgent, "USER");
-        const token = generateJwtToken({
-          userId: session.id,
-          username: normalized,
-          role: "USER",
-          sessionId: session.id,
-          status: "Deception"
-        });
-        await addLogEntry(
-          session.id,
-          "Brute Force Threshold Breached",
-          `Repeated failed logins (${failCount} attempts). Silent deceptive diversion activated.`,
-          30
-        );
-        return res.json({ status: "success", token, session });
-      } else {
-        // Standard failed response
-        createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failCount}/3).`, "auth_system");
-        return res.status(401).json({
-          status: "error",
-          message: `Invalid credentials. Attempt ${failCount} of 3.`
-        });
-      }
-    } catch (err: any) {
-      console.error("Critical error in employee login:", err);
-      return res.status(500).json({ status: "error", message: err.message || "Internal authentication error." });
+    } else {
+      const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
+      failures.count += 1;
+      failures.lastAttempt = Date.now();
+      loginFailures[normalized] = failures;
+      failCount = failures.count;
     }
-  });
 
-  app.post("/api/auth/admin-login", async (req, res) => {
-    try {
-      const { username, password } = req.body;
-      const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
-      const userAgent = req.headers["user-agent"] || "Unknown User Agent";
-
-      if (!username) {
-        return res.status(400).json({ status: "error", message: "Admin username is required." });
-      }
-
-      const normalized = username.trim().toLowerCase();
-
-      // Authenticate against MongoDB Admin record
+    if (failCount >= 3) {
+      // 3rd failure threshold breached: silently redirect attacker to Shadow Service (Honeypot)
       if (isDbConnected()) {
-        try {
-          const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
-          if (dbUser && dbUser.role === "ADMIN" && dbUser.passwordHash) {
-            if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
-              const session = createSession(dbUser.username, "Genuine", ip, userAgent, "ADMIN", dbUser.id);
-              const token = generateJwtToken({
-                userId: dbUser.id || session.id,
-                username: dbUser.username,
-                role: "ADMIN",
-                sessionId: session.id,
-                status: "Genuine"
-              });
-              return res.json({
-                status: "success",
-                token,
-                role: "admin",
-                session: {
-                  id: session.id,
-                  username: dbUser.displayName || dbUser.username,
-                  role: "admin"
-                }
-              });
-            }
-          }
-        } catch (e) {}
+        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
       }
+      delete loginFailures[normalized];
 
-      // Check if password matches env ADMIN_PASSWORD or default admin credentials
-      const envAdminUser = (process.env.ADMIN_USERNAME || "admin@svit.edu").toLowerCase();
-      const envAdminPass = process.env.ADMIN_PASSWORD || "AdminSecurePass#2026";
-      const isAdminUserMatch = normalized === envAdminUser || normalized === "admin" || normalized === "admin@svit.edu";
-      const isAdminPassMatch = password === envAdminPass || password === "admin123" || password === "admin" || password === "AdminSecurePass#2026";
-
-      if (isAdminUserMatch && isAdminPassMatch) {
-        const session = createSession(normalized, "Genuine", ip, userAgent, "ADMIN");
-        const token = generateJwtToken({
-          userId: session.id,
-          username: normalized,
-          role: "ADMIN",
-          sessionId: session.id,
-          status: "Genuine"
-        });
-        return res.json({
-          status: "success",
-          token,
-          role: "admin",
-          session: {
-            id: session.id,
-            username: "SOC Security Lead",
-            role: "ADMIN"
-          }
-        });
-      }
-
+      const session = await createSession(normalized, "Deception", ip, userAgent, "USER");
+      const token = generateJwtToken({
+        userId: session.id,
+        username: normalized,
+        role: "USER",
+        sessionId: session.id,
+        status: "Deception"
+      });
+      await addLogEntry(
+        session.id,
+        "Brute Force Threshold Breached",
+        `Repeated failed logins (${failCount} attempts). Silent deceptive diversion activated.`,
+        30
+      );
+      return res.json({ status: "success", token, session });
+    } else {
+      // Standard failed response
+      await createAlert("warning", `Failed login attempt for user '${normalized}' (Attempt ${failCount}/3).`, "auth_system");
       return res.status(401).json({
         status: "error",
-        message: "Invalid SOC Admin credentials."
+        message: `Invalid credentials. Attempt ${failCount} of 3.`
       });
-    } catch (err: any) {
-      console.error("Critical error in admin-login:", err);
-      return res.status(500).json({ status: "error", message: err.message || "Internal authentication error." });
     }
-  });
+  } catch (err: any) {
+    console.error("Critical error in employee login:", err);
+    return res.status(500).json({ status: "error", message: err.message || "Internal authentication error." });
+  }
+});
 
-  app.post("/api/auth/logout", (req, res) => {
-    const { sessionId } = req.body;
-    if (sessionId) {
-      endSession(sessionId);
-    }
-    res.json({ status: "success" });
-  });
+app.post("/api/auth/admin-login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
+    const userAgent = (req.headers["user-agent"] as string) || "Unknown User Agent";
 
-  app.get("/api/session/:sessionId", (req, res) => {
-    const { sessionId } = req.params;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session) {
-      return res.status(404).json({ status: "error", message: "Session not found." });
-    }
-    res.json({ status: "success", session });
-  });
-
-  // ==========================================
-  // REAL DASHBOARD DATA (LEGITIMATE USERS)
-  // ==========================================
-
-  // ==========================================
-  // REAL DASHBOARD DATA (LEGITIMATE USERS)
-  // ==========================================
-
-  app.get("/api/real/dashboard/:sessionId", async (req, res) => {
-    const { sessionId } = req.params;
-    const session = await findSession(sessionId);
-    if (!session || session.status !== "Genuine") {
-      return res.status(403).json({ status: "error", message: "Unauthorized access." });
+    if (!username) {
+      return res.status(400).json({ status: "error", message: "Admin username is required." });
     }
 
-    const empData = await getEmployeeData(session.username);
+    const normalized = username.trim().toLowerCase();
 
-    res.json({
-      status: "success",
-      data: {
-        systemPostures: {
-          firewall: "Operational",
-          vpnGateway: "Secure (14 Active Tunnels)",
-          threatLevel: "Low / Normal",
-          endpoints: "42/42 Secured"
-        },
-        projects: empData.projects,
-        tasks: empData.tasks,
-        tickets: empData.tickets
-      }
+    // Authenticate against MongoDB Admin record
+    if (isDbConnected()) {
+      try {
+        const dbUser = await (UserModel as any).findOne({ username: normalized, active: true }).lean();
+        if (dbUser && dbUser.role === "ADMIN" && dbUser.passwordHash) {
+          if (bcrypt.compareSync(password || "", dbUser.passwordHash)) {
+            const session = await createSession(dbUser.username, "Genuine", ip, userAgent, "ADMIN", dbUser.id);
+            const token = generateJwtToken({
+              userId: dbUser.id || session.id,
+              username: dbUser.username,
+              role: "ADMIN",
+              sessionId: session.id,
+              status: "Genuine"
+            });
+            return res.json({
+              status: "success",
+              token,
+              role: "admin",
+              session: {
+                id: session.id,
+                username: dbUser.displayName || dbUser.username,
+                role: "admin"
+              }
+            });
+          }
+        }
+      } catch (e) {}
+    }
+
+    // Check if password matches env ADMIN_PASSWORD or default admin credentials
+    const envAdminUser = (process.env.ADMIN_USERNAME || "admin@svit.edu").toLowerCase();
+    const envAdminPass = process.env.ADMIN_PASSWORD || "AdminSecurePass#2026";
+    const isAdminUserMatch = normalized === envAdminUser || normalized === "admin" || normalized === "admin@svit.edu";
+    const isAdminPassMatch = password === envAdminPass || password === "admin123" || password === "admin" || password === "AdminSecurePass#2026";
+
+    if (isAdminUserMatch && isAdminPassMatch) {
+      const session = await createSession(normalized, "Genuine", ip, userAgent, "ADMIN");
+      const token = generateJwtToken({
+        userId: session.id,
+        username: normalized,
+        role: "ADMIN",
+        sessionId: session.id,
+        status: "Genuine"
+      });
+      return res.json({
+        status: "success",
+        token,
+        role: "admin",
+        session: {
+          id: session.id,
+          username: "SOC Security Lead",
+          role: "ADMIN"
+        }
+      });
+    }
+
+    return res.status(401).json({
+      status: "error",
+      message: "Invalid SOC Admin credentials."
     });
+  } catch (err: any) {
+    console.error("Critical error in admin-login:", err);
+    return res.status(500).json({ status: "error", message: err.message || "Internal authentication error." });
+  }
+});
+
+app.post("/api/auth/logout", async (req, res) => {
+  const { sessionId } = req.body;
+  if (sessionId) {
+    await endSession(sessionId);
+    if (isDbConnected()) {
+      await AuditEventModel.create({
+        id: "audit_" + crypto.randomUUID().replace(/-/g, "").substring(0, 10),
+        timestamp: new Date().toISOString(),
+        sessionId,
+        username: "system",
+        role: "USER",
+        action: `Session Logout: ${sessionId}`,
+        endpoint: "/api/auth/logout",
+        method: "POST",
+        status: 200,
+        threatScore: 0,
+        decision: "ALLOW"
+      }).catch(() => {});
+    }
+  }
+  res.json({ status: "success" });
+});
+
+app.get("/api/session/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const session = await findSession(sessionId);
+  if (!session) {
+    return res.status(404).json({ status: "error", message: "Session not found." });
+  }
+  res.json({ status: "success", session });
+});
+
+// ==========================================
+// REAL DASHBOARD DATA (LEGITIMATE USERS)
+// ==========================================
+
+app.get("/api/real/dashboard/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const session = await findSession(sessionId);
+  if (!session || session.status !== "Genuine") {
+    return res.status(403).json({ status: "error", message: "Unauthorized access." });
+  }
+
+  const empData = await getEmployeeData(session.username);
+
+  res.json({
+    status: "success",
+    data: {
+      systemPostures: {
+        firewall: "Operational",
+        vpnGateway: "Secure (14 Active Tunnels)",
+        threatLevel: "Low / Normal",
+        endpoints: "42/42 Secured"
+      },
+      projects: empData.projects,
+      tasks: empData.tasks,
+      tickets: empData.tickets
+    }
   });
+});
 
-  app.post("/api/employee/tasks", async (req, res) => {
-    const { sessionId, title } = req.body;
-    if (!title || !sessionId) {
-      return res.status(400).json({ status: "error", message: "Task title and session ID are required." });
-    }
-    const session = await findSession(sessionId);
-    if (!session || session.status !== "Genuine") {
-      return res.status(403).json({ status: "error", message: "Unauthorized access." });
-    }
+app.post("/api/employee/tasks", async (req, res) => {
+  const { sessionId, title } = req.body;
+  const reqSessionId = sessionId || (req.headers["x-session-id"] as string);
+  if (!title || !reqSessionId) {
+    return res.status(400).json({ status: "error", message: "Task title and session ID are required." });
+  }
+  const session = await findSession(reqSessionId);
+  if (!session || session.status !== "Genuine") {
+    return res.status(403).json({ status: "error", message: "Unauthorized access." });
+  }
 
-    const task = await addEmployeeTask(session.username, title.trim());
-    await addLogEntry(session.id, "Task Created", `Employee created task: '${task.title}'`, 0);
-    res.json({ status: "success", task });
-  });
+  const task = await addEmployeeTask(session.username, title.trim());
+  await addLogEntry(session.id, "Task Created", `Employee created task: '${task.title}'`, 0);
+  res.json({ status: "success", task });
+});
 
-  app.patch("/api/employee/tasks/:taskId", async (req, res) => {
-    const { taskId } = req.params;
-    const { sessionId, completed } = req.body;
-    if (!sessionId) {
-      return res.status(400).json({ status: "error", message: "Session ID is required." });
-    }
-    const session = await findSession(sessionId);
-    if (!session || session.status !== "Genuine") {
-      return res.status(403).json({ status: "error", message: "Unauthorized access." });
-    }
+app.patch("/api/employee/tasks/:taskId", async (req, res) => {
+  const { taskId } = req.params;
+  const { sessionId, completed } = req.body;
+  const reqSessionId = sessionId || (req.headers["x-session-id"] as string);
+  if (!reqSessionId) {
+    return res.status(400).json({ status: "error", message: "Session ID is required." });
+  }
+  const session = await findSession(reqSessionId);
+  if (!session || session.status !== "Genuine") {
+    return res.status(403).json({ status: "error", message: "Unauthorized access." });
+  }
 
-    const updated = await toggleEmployeeTask(taskId, Boolean(completed));
-    await addLogEntry(
-      session.id,
-      "Task Status Updated",
-      `Employee marked task '${taskId}' as ${completed ? "completed" : "pending"}`,
-      0
-    );
-    res.json({ status: "success", task: updated });
-  });
+  const updated = await toggleEmployeeTask(taskId, Boolean(completed));
+  await addLogEntry(
+    session.id,
+    "Task Status Updated",
+    `Employee marked task '${taskId}' as ${completed ? "completed" : "pending"}`,
+    0
+  );
+  res.json({ status: "success", task: updated });
+});
 
-  app.delete("/api/employee/tasks/:taskId", async (req, res) => {
-    const { taskId } = req.params;
-    const { sessionId } = req.body;
-    const reqSessionId = sessionId || (req.headers["x-session-id"] as string);
-    if (!reqSessionId) {
-      return res.status(400).json({ status: "error", message: "Session ID is required." });
-    }
-    const session = await findSession(reqSessionId);
-    if (!session || session.status !== "Genuine") {
-      return res.status(403).json({ status: "error", message: "Unauthorized access." });
-    }
+app.delete("/api/employee/tasks/:taskId", async (req, res) => {
+  const { taskId } = req.params;
+  const { sessionId } = req.body;
+  const reqSessionId = sessionId || (req.headers["x-session-id"] as string);
+  if (!reqSessionId) {
+    return res.status(400).json({ status: "error", message: "Session ID is required." });
+  }
+  const session = await findSession(reqSessionId);
+  if (!session || session.status !== "Genuine") {
+    return res.status(403).json({ status: "error", message: "Unauthorized access." });
+  }
 
-    await deleteEmployeeTask(taskId);
-    await addLogEntry(session.id, "Task Removed", `Employee deleted task ID '${taskId}'`, 0);
-    res.json({ status: "success" });
-  });
+  await deleteEmployeeTask(taskId);
+  await addLogEntry(session.id, "Task Removed", `Employee deleted task ID '${taskId}'`, 0);
+  res.json({ status: "success" });
+});
 
-  app.post("/api/employee/projects", async (req, res) => {
-    const { sessionId, code, name, schedule } = req.body;
-    if (!code || !name || !sessionId) {
-      return res.status(400).json({ status: "error", message: "Project details are required." });
-    }
-    const session = await findSession(sessionId);
-    if (!session || session.status !== "Genuine") {
-      return res.status(403).json({ status: "error", message: "Unauthorized access." });
-    }
+app.post("/api/employee/projects", async (req, res) => {
+  const { sessionId, code, name, schedule } = req.body;
+  const reqSessionId = sessionId || (req.headers["x-session-id"] as string);
+  if (!code || !name || !reqSessionId) {
+    return res.status(400).json({ status: "error", message: "Project details are required." });
+  }
+  const session = await findSession(reqSessionId);
+  if (!session || session.status !== "Genuine") {
+    return res.status(403).json({ status: "error", message: "Unauthorized access." });
+  }
 
-    const project = await addEmployeeProject(session.username, code, name, schedule);
-    await addLogEntry(session.id, "Project Initiative Created", `Employee created project initiative '${code}: ${name}'`, 0);
-    res.json({ status: "success", project });
-  });
+  const project = await addEmployeeProject(session.username, code, name, schedule);
+  await addLogEntry(session.id, "Project Initiative Created", `Employee created project initiative '${code}: ${name}'`, 0);
+  res.json({ status: "success", project });
+});
 
-  app.post("/api/employee/tickets", async (req, res) => {
-    const { sessionId, category, text } = req.body;
-    if (!text || !sessionId) {
-      return res.status(400).json({ status: "error", message: "Ticket content and session ID are required." });
-    }
-    const session = await findSession(sessionId);
-    if (!session || session.status !== "Genuine") {
-      return res.status(403).json({ status: "error", message: "Unauthorized access." });
-    }
+app.post("/api/employee/tickets", async (req, res) => {
+  const { sessionId, category, text } = req.body;
+  const reqSessionId = sessionId || (req.headers["x-session-id"] as string);
+  if (!text || !reqSessionId) {
+    return res.status(400).json({ status: "error", message: "Ticket content and session ID are required." });
+  }
+  const session = await findSession(reqSessionId);
+  if (!session || session.status !== "Genuine") {
+    return res.status(403).json({ status: "error", message: "Unauthorized access." });
+  }
 
-    const ticket = await addEmployeeTicket(session.username, category || "IT Support", text);
-    await addLogEntry(session.id, "IT Support Ticket Submitted", `Employee submitted ticket [${ticket.category}]: '${ticket.text.substring(0, 50)}'`, 0);
-    createAlert("info", `Employee '${session.username}' submitted IT ticket: [${ticket.category}] ${ticket.text.substring(0, 40)}`, session.id);
-    res.json({ status: "success", ticket });
-  });
+  const ticket = await addEmployeeTicket(session.username, category || "IT Support", text);
+  await addLogEntry(session.id, "IT Support Ticket Submitted", `Employee submitted ticket [${ticket.category}]: '${ticket.text.substring(0, 50)}'`, 0);
+  await createAlert("info", `Employee '${session.username}' submitted IT ticket: [${ticket.category}] ${ticket.text.substring(0, 40)}`, session.id);
+  res.json({ status: "success", ticket });
+});
 
-  // ==========================================
-  // DECEPTION DASHBOARD ENDPOINTS (SHADOW ZONE)
-  // ==========================================
+// ==========================================
+// DECEPTION DASHBOARD ENDPOINTS (SHADOW ZONE)
+// ==========================================
 
-  app.get("/api/deception/files/:sessionId", (req, res) => {
-    const { sessionId } = req.params;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session || session.status !== "Deception") {
-      return res.status(403).json({ status: "error", message: "Unauthorized." });
-    }
+app.get("/api/deception/files/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const session = await findSession(sessionId);
+  if (!session || session.status !== "Deception") {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Deception zone session required." });
+  }
 
-    addLogEntry(sessionId, "Accessed File Directory", "Queried root filesystem contents via Cloud File Explorer", 10);
+  await addLogEntry(sessionId, "Accessed File Directory", "Queried root filesystem contents via Cloud File Explorer", 10);
 
-    const list = DECEPTION_FILES.map(f => ({
-      name: f.name,
-      type: f.type,
-      size: f.size,
-      sensitive: f.sensitive
-    }));
+  const list = DECEPTION_FILES.map(f => ({
+    name: f.name,
+    type: f.type,
+    size: f.size,
+    sensitive: f.sensitive
+  }));
 
-    res.json({ status: "success", files: list });
-  });
+  res.json({ status: "success", files: list });
+});
 
-  app.get("/api/deception/file/:sessionId/:fileName", (req, res) => {
-    const { sessionId, fileName } = req.params;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session || session.status !== "Deception") {
-      return res.status(403).json({ status: "error", message: "Unauthorized." });
-    }
+app.get("/api/deception/file/:sessionId/:fileName", async (req, res) => {
+  const { sessionId, fileName } = req.params;
+  const session = await findSession(sessionId);
+  if (!session || session.status !== "Deception") {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Deception zone session required." });
+  }
 
-    const file = DECEPTION_FILES.find(f => f.name === fileName);
-    if (!file) {
-      return res.status(404).json({ status: "error", message: "File not found." });
-    }
+  const file = DECEPTION_FILES.find(f => f.name.toLowerCase() === fileName.toLowerCase());
+  if (!file) {
+    return res.status(404).json({ status: "error", message: "File not found." });
+  }
 
-    const points = file.sensitive ? 30 : 5;
-    const alertTag = file.sensitive ? "[HIGH SENSITIVITY]" : "[NORMAL]";
-    addLogEntry(sessionId, `Viewed Document`, `Accessed file '${fileName}' ${alertTag}. Size: ${file.size}`, points);
+  const points = file.sensitive ? 30 : 5;
+  const alertTag = file.sensitive ? "[HIGH SENSITIVITY]" : "[NORMAL]";
+  await addLogEntry(sessionId, `Viewed Document`, `Accessed file '${file.name}' ${alertTag}. Size: ${file.size}`, points);
 
-    res.json({ status: "success", file });
-  });
+  res.json({ status: "success", file });
+});
 
-  app.post("/api/deception/terminal/:sessionId", (req, res) => {
-    const { sessionId } = req.params;
-    const { command } = req.body;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session || session.status !== "Deception") {
-      return res.status(403).json({ status: "error", message: "Unauthorized." });
-    }
+app.post("/api/deception/terminal/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const { command } = req.body;
+  const session = await findSession(sessionId);
+  if (!session || session.status !== "Deception") {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Deception zone session required." });
+  }
 
-    if (!command) {
-      return res.json({ status: "success", output: "" });
-    }
+  if (!command) {
+    return res.json({ status: "success", output: "" });
+  }
 
-    const trimmed = command.trim();
-    const parts = trimmed.split(" ");
-    const cmd = parts[0].toLowerCase();
-    const arg = parts.slice(1).join(" ");
+  const trimmed = command.trim();
+  const parts = trimmed.split(" ");
+  const cmd = parts[0].toLowerCase();
+  const arg = parts.slice(1).join(" ");
 
-    addLogEntry(sessionId, "Terminal Command Execution", `Ran terminal command: '${trimmed}'`, 25);
+  await addLogEntry(sessionId, "Terminal Command Execution", `Ran terminal command: '${trimmed}'`, 25);
 
-    let output = "";
+  let output = "";
 
-    switch (cmd) {
-      case "help":
-        output = `Available System Diagnostics Tools:
+  switch (cmd) {
+    case "help":
+      output = `Available System Diagnostics Tools:
   ls               List files in current working directory
   cat [file]       Concatenate and display file content
   whoami           Show current logged in system profile
@@ -693,17 +703,17 @@ async function startServer() {
   ifconfig         Show gateway configurations
   clear            Clear screen
   ping [host]      Diagnostic packet test to targets`;
-        break;
-      case "ls":
-      case "dir":
-        output = DECEPTION_FILES.map(f => `${f.size.padEnd(10)}  ${f.name}`).join("\n");
-        break;
-      case "whoami":
-        output = "root";
-        break;
-      case "env":
-        addLogEntry(sessionId, "Revealed Vault Secrets", "Triggered 'env' command in console to harvest environmental variables", 35);
-        output = `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      break;
+    case "ls":
+    case "dir":
+      output = DECEPTION_FILES.map(f => `${f.size.padEnd(10)}  ${f.name}`).join("\n");
+      break;
+    case "whoami":
+      output = "root";
+      break;
+    case "env":
+      await addLogEntry(sessionId, "Revealed Vault Secrets", "Triggered 'env' command in console to harvest environmental variables", 35);
+      output = `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 SHELL=/bin/bash
 USER=root
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
@@ -712,150 +722,152 @@ POSTGRES_DB_USER=master_postgres_dba
 POSTGRES_DB_PASSWORD=vault_master_db_root_pass_920%
 JWT_SECRET_KEY=9a626a5be893ef10d8bbec9b26d84f886475fa3d16b
 PROD_DATABASE_URL=postgresql://master_postgres_dba:vault_master_db_root_pass_920%@10.0.5.42:5432/apex_production`;
-        break;
-      case "netstat":
-        output = `Active Internet connections (only servers)
+      break;
+    case "netstat":
+      output = `Active Internet connections (only servers)
 Proto Recv-Q Send-Q Local Address           Foreign Address         State      
 tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN     
 tcp        0      0 10.0.1.15:5432          10.0.5.42:39201         ESTABLISHED
 tcp        0      0 10.0.1.15:80            127.0.0.1:49204         ESTABLISHED`;
-        break;
-      case "ifconfig":
-        output = `eth0      Link encap:Ethernet  HWaddr 02:42:AC:11:00:02  
-          inet addr:10.0.1.15  Bcast:10.0.1.255  Mask:255.255.255.0
-          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
-          RX packets:102048 errors:0 dropped:0 overruns:0 frame:0
-          TX packets:95408 errors:0 dropped:0 overruns:0 carrier:0
-          collisions:0 txqueuelen:0 
-          RX bytes:145029304 (145.0 MB)  TX bytes:102049820 (102.0 MB)`;
-        break;
-      case "cat":
-        if (!arg) {
-          output = "Usage: cat [filename]";
+      break;
+    case "ifconfig":
+      output = `eth0      Link encap:Ethernet  HWaddr 02:42:AC:11:00:02  
+        inet addr:10.0.1.15  Bcast:10.0.1.255  Mask:255.255.255.0
+        UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+        RX packets:102048 errors:0 dropped:0 overruns:0 frame:0
+        TX packets:95408 errors:0 dropped:0 overruns:0 carrier:0
+        collisions:0 txqueuelen:0 
+        RX bytes:145029304 (145.0 MB)  TX bytes:102049820 (102.0 MB)`;
+      break;
+    case "cat":
+      if (!arg) {
+        output = "Usage: cat [filename]";
+      } else {
+        const file = DECEPTION_FILES.find(f => f.name.toLowerCase() === arg.toLowerCase());
+        if (file) {
+          const points = file.sensitive ? 30 : 5;
+          await addLogEntry(sessionId, "Read Document Content", `Read file content of '${file.name}' using terminal`, points);
+          output = file.content;
         } else {
-          const file = DECEPTION_FILES.find(f => f.name.toLowerCase() === arg.toLowerCase());
-          if (file) {
-            const points = file.sensitive ? 30 : 5;
-            addLogEntry(sessionId, "Read Document Content", `Read file content of '${file.name}' using terminal`, points);
-            output = file.content;
-          } else {
-            output = `cat: ${arg}: No such file or directory`;
-          }
+          output = `cat: ${arg}: No such file or directory`;
         }
-        break;
-      case "ping":
-        output = `PING ${arg || "10.0.1.1"} (${arg || "10.0.1.1"}) 56(84) bytes of data.
+      }
+      break;
+    case "ping":
+      output = `PING ${arg || "10.0.1.1"} (${arg || "10.0.1.1"}) 56(84) bytes of data.
 64 bytes from ${arg || "10.0.1.1"}: icmp_seq=1 ttl=64 time=0.421 ms
 64 bytes from ${arg || "10.0.1.1"}: icmp_seq=2 ttl=64 time=0.312 ms
 --- ${arg || "10.0.1.1"} ping statistics ---
 2 packets transmitted, 2 received, 0% packet loss, time 1002ms
 rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
-        break;
-      default:
-        output = `bash: ${cmd}: command not found. Enter 'help' to review available administrative utilities.`;
-        break;
-    }
+      break;
+    default:
+      output = `bash: ${cmd}: command not found. Enter 'help' to review available administrative utilities.`;
+      break;
+  }
 
-    res.json({ status: "success", output });
+  res.json({ status: "success", output });
+});
+
+app.post("/api/deception/search/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const { query } = req.body;
+  const session = await findSession(sessionId);
+  if (!session || session.status !== "Deception") {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Deception zone session required." });
+  }
+
+  const cleanQuery = (query || "").trim().toLowerCase();
+  let points = 5;
+
+  const highThreatKeywords = ["admin", "root", "password", "key", "secret", "db", "leak", "hack", "payment", "credit"];
+  const matchesKeyword = highThreatKeywords.some(keyword => cleanQuery.includes(keyword));
+
+  if (matchesKeyword) {
+    points = 15;
+  }
+
+  await addLogEntry(sessionId, "Search Console Query", `Searched deception system logs for query: '${query}'`, points);
+
+  const allFakeAssets = [
+    { name: "production_postgres_secrets.yaml", location: "/vault/secrets/", match: "password, db, root" },
+    { name: "private_ssh_key_root.pem", location: "/home/root/.ssh/", match: "key, root" },
+    { name: "admin_panel_bypass_config.json", location: "/etc/nginx/conf.d/", match: "admin, bypass" },
+    { name: "q3_merger_acquisition_plan.pdf", location: "/shared/corporate/", match: "merger, plan" },
+    { name: "stripe_payment_api_key_live.txt", location: "/vault/keys/", match: "stripe, key, payment" },
+    { name: "customer_pii_export_raw.csv", location: "/db_exports/backups/", match: "customer, credit, database" }
+  ];
+
+  const results = allFakeAssets.filter(asset => {
+    if (!cleanQuery) return true;
+    return asset.name.toLowerCase().includes(cleanQuery) ||
+           asset.location.toLowerCase().includes(cleanQuery) ||
+           asset.match.toLowerCase().includes(cleanQuery);
   });
 
-  app.post("/api/deception/search/:sessionId", (req, res) => {
-    const { sessionId } = req.params;
-    const { query } = req.body;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session || session.status !== "Deception") {
-      return res.status(403).json({ status: "error", message: "Unauthorized." });
-    }
+  res.json({ status: "success", results });
+});
 
-    const cleanQuery = (query || "").trim().toLowerCase();
-    let points = 5;
+app.post("/api/deception/action/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const { action, details, threatPoints } = req.body;
+  const session = await findSession(sessionId);
+  if (!session || session.status !== "Deception") {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Deception zone session required." });
+  }
 
-    const highThreatKeywords = ["admin", "root", "password", "key", "secret", "db", "leak", "hack", "payment", "credit"];
-    const matchesKeyword = highThreatKeywords.some(keyword => cleanQuery.includes(keyword));
+  await addLogEntry(sessionId, action, details, threatPoints || 20);
+  res.json({ status: "success", feedback: "Operation accepted and processing in sandbox environment." });
+});
 
-    if (matchesKeyword) {
-      points = 15;
-    }
+// ==========================================
+// ADMIN MONITORING HUB ENDPOINTS (PROTECTED BY requireAdmin)
+// ==========================================
 
-    addLogEntry(sessionId, "Search Console Query", `Searched deception system logs for query: '${query}'`, points);
+app.get("/api/admin/employees", requireAdmin, async (req, res) => {
+  const empList = await getRegisteredEmployees();
+  res.json({ status: "success", employees: empList });
+});
 
-    const allFakeAssets = [
-      { name: "production_postgres_secrets.yaml", location: "/vault/secrets/", match: "password, db, root" },
-      { name: "private_ssh_key_root.pem", location: "/home/root/.ssh/", match: "key, root" },
-      { name: "admin_panel_bypass_config.json", location: "/etc/nginx/conf.d/", match: "admin, bypass" },
-      { name: "q3_merger_acquisition_plan.pdf", location: "/shared/corporate/", match: "merger, plan" },
-      { name: "stripe_payment_api_key_live.txt", location: "/vault/keys/", match: "stripe, key, payment" },
-      { name: "customer_pii_export_raw.csv", location: "/db_exports/backups/", match: "customer, credit, database" }
-    ];
+app.get("/api/admin/students", requireAdmin, async (req, res) => {
+  const empList = await getRegisteredEmployees();
+  res.json({ status: "success", students: empList, employees: empList });
+});
 
-    const results = allFakeAssets.filter(asset => {
-      if (!cleanQuery) return true;
-      return asset.name.toLowerCase().includes(cleanQuery) ||
-             asset.location.toLowerCase().includes(cleanQuery) ||
-             asset.match.toLowerCase().includes(cleanQuery);
-    });
+app.post("/api/admin/employees", requireAdmin, async (req, res) => {
+  const { username, password, department, role, displayName } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ status: "error", message: "Email and password are both required." });
+  }
+  try {
+    const employee = await registerEmployee(username, password, department, role, displayName);
+    await createAlert("info", `Admin provisioned a new employee credential for '${employee.username}' (${employee.department} - ${employee.role}).`, "admin_console");
+    res.json({ status: "success", message: `Employee '${employee.username}' registered successfully.`, employee });
+  } catch (err: any) {
+    res.status(400).json({ status: "error", message: err.message || "Registration failed." });
+  }
+});
 
-    res.json({ status: "success", results });
-  });
+app.delete("/api/admin/employees/:username", requireAdmin, async (req, res) => {
+  const { username } = req.params;
+  try {
+    const removed = await removeEmployee(username);
+    await createAlert("warning", `Admin removed employee '${username}' from company registry.`, "admin_console");
+    res.json({ status: "success", message: `Employee '${username}' removed successfully.`, removed });
+  } catch (err: any) {
+    res.status(400).json({ status: "error", message: err.message || "Removal failed." });
+  }
+});
 
-  app.post("/api/deception/action/:sessionId", (req, res) => {
-    const { sessionId } = req.params;
-    const { action, details, threatPoints } = req.body;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session || session.status !== "Deception") {
-      return res.status(403).json({ status: "error", message: "Unauthorized." });
-    }
-
-    addLogEntry(sessionId, action, details, threatPoints || 20);
-    res.json({ status: "success", feedback: "Operation accepted and processing in sandbox environment." });
-  });
-
-  // ==========================================
-  // ADMIN MONITORING HUB ENDPOINTS (PROTECTED BY requireAdmin)
-  // ==========================================
-
-  app.get("/api/admin/employees", requireAdmin, async (req, res) => {
-    const empList = await getRegisteredEmployees();
-    res.json({ status: "success", employees: empList });
-  });
-
-  app.get("/api/admin/students", requireAdmin, async (req, res) => {
-    const empList = await getRegisteredEmployees();
-    res.json({ status: "success", students: empList, employees: empList });
-  });
-
-  app.post("/api/admin/employees", requireAdmin, async (req, res) => {
-    const { username, password, department, role, displayName } = req.body;
-    if (!username || !password) {
-      return res.status(400).json({ status: "error", message: "Email and password are both required." });
-    }
+app.get("/api/admin/sessions", requireAdmin, async (req, res) => {
+  if (isDbConnected()) {
     try {
-      const employee = await registerEmployee(username, password, department, role, displayName);
-      createAlert("info", `Admin provisioned a new employee credential for '${employee.username}' (${employee.department} - ${employee.role}).`, "admin_console");
-      res.json({ status: "success", message: `Employee '${employee.username}' registered successfully.`, employee });
-    } catch (err: any) {
-      res.status(400).json({ status: "error", message: err.message || "Registration failed." });
-    }
-  });
-
-  app.delete("/api/admin/employees/:username", requireAdmin, async (req, res) => {
-    const { username } = req.params;
-    try {
-      const removed = await removeEmployee(username);
-      createAlert("warning", `Admin removed employee '${username}' from company registry.`, "admin_console");
-      res.json({ status: "success", message: `Employee '${username}' removed successfully.`, removed });
-    } catch (err: any) {
-      res.status(400).json({ status: "error", message: err.message || "Removal failed." });
-    }
-  });
-
-  app.get("/api/admin/sessions", requireAdmin, async (req, res) => {
-    if (isDbConnected()) {
-      const dbSessions = await (SessionModel as any).find().lean();
-      if (dbSessions && dbSessions.length > 0) {
+      const dbSessions = await (SessionModel as any).find().sort({ _id: -1 }).lean();
+      if (dbSessions) {
         const mapped = dbSessions.map((s: any) => ({
           id: s.id || s.sessionId,
           username: s.username,
+          role: s.role || "USER",
           ip: s.ip || "127.0.0.1",
           userAgent: s.userAgent || "Browser",
           loginTime: s.loginTime || new Date().toISOString(),
@@ -868,34 +880,76 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
         }));
         return res.json({ status: "success", sessions: mapped });
       }
+    } catch (err: any) {
+      console.error("Error fetching sessions from DB:", err);
+      return res.status(503).json({ status: "error", message: "Database query failed for active sessions." });
     }
-    res.json({ status: "success", sessions });
-  });
+  }
+  res.json({ status: "success", sessions });
+});
 
-  app.get("/api/admin/alerts", requireAdmin, async (req, res) => {
-    if (isDbConnected()) {
+app.get("/api/admin/alerts", requireAdmin, async (req, res) => {
+  if (isDbConnected()) {
+    try {
       const dbAlerts = await (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean();
-      if (dbAlerts && dbAlerts.length > 0) {
+      if (dbAlerts) {
         return res.json({ status: "success", alerts: dbAlerts });
       }
+    } catch (err: any) {
+      console.error("Error fetching alerts from DB:", err);
+      return res.status(503).json({ status: "error", message: "Database query failed for alerts." });
     }
-    res.json({ status: "success", alerts });
-  });
+  }
+  res.json({ status: "success", alerts });
+});
 
-  app.get("/api/admin/stats", requireAdmin, (req, res) => {
-    res.json({ status: "success", stats: getStats() });
-  });
+app.get("/api/admin/stats", requireAdmin, async (req, res) => {
+  let targetSessions = sessions;
+  if (isDbConnected()) {
+    try {
+      const dbSessions = await (SessionModel as any).find().lean();
+      if (dbSessions && dbSessions.length > 0) {
+        targetSessions = dbSessions.map((s: any) => ({
+          id: s.id || s.sessionId,
+          username: s.username,
+          role: s.role || "USER",
+          ip: s.ip || "127.0.0.1",
+          userAgent: s.userAgent || "Browser",
+          loginTime: s.loginTime || new Date().toISOString(),
+          status: s.status,
+          threatScore: s.threatScore || 0,
+          failedAttempts: s.failedAttempts || 0,
+          generatingSummary: s.generatingSummary || false,
+          aiSummary: s.aiSummary,
+          logs: s.logs || []
+        }));
+      }
+    } catch (err) {
+      console.error("Error fetching sessions in /api/admin/stats:", err);
+    }
+  }
+  res.json({ status: "success", stats: getStats(targetSessions) });
+});
 
-  // Production-friendly Polling endpoint for Multi-Device Admin Sync across Vercel Functions
-  app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
+// Production-friendly Polling endpoint for Multi-Device Admin Sync across Vercel Functions
+app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
+  try {
+    let resolvedSessions = sessions;
+    let resolvedAlerts = alerts;
+    let resolvedEmployees = registeredUsers;
+    let resolvedPolicies: any[] = await getAllPolicies();
+
     if (isDbConnected()) {
       try {
-        const dbSessions = await (SessionModel as any).find().sort({ _id: -1 }).lean();
-        const dbAlerts = await (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean();
-        const empList = await (UserModel as any).find({}, { passwordHash: 0 }).lean();
+        const [dbSessions, dbAlerts, empList, polList] = await Promise.all([
+          (SessionModel as any).find().sort({ _id: -1 }).lean(),
+          (AlertModel as any).find().sort({ _id: -1 }).limit(50).lean(),
+          (UserModel as any).find({}, { passwordHash: 0 }).lean(),
+          getAllPolicies()
+        ]);
 
-        if (dbSessions && dbSessions.length > 0) {
-          const mappedSessions = dbSessions.map((s: any) => ({
+        if (dbSessions) {
+          resolvedSessions = dbSessions.map((s: any) => ({
             id: s.id || s.sessionId,
             username: s.username,
             role: s.role || "USER",
@@ -910,8 +964,8 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
             logs: s.logs || []
           }));
 
-          // Sync in-memory cache with DB sessions
-          mappedSessions.forEach((ms: any) => {
+          // Synchronize in-memory cache
+          resolvedSessions.forEach((ms: any) => {
             const idx = sessions.findIndex(s => s.id === ms.id);
             if (idx === -1) {
               sessions.unshift(ms);
@@ -921,244 +975,284 @@ rtt min/avg/max/mdev = 0.312/0.366/0.421/0.057 ms`;
           });
         }
 
-        const allPols = await getAllPolicies();
+        if (dbAlerts && dbAlerts.length > 0) {
+          resolvedAlerts = dbAlerts;
+        }
 
-        return res.json({
-          status: "success",
-          sessions: sessions,
-          alerts: dbAlerts.length > 0 ? dbAlerts : alerts,
-          employees: empList,
-          policies: allPols,
-          stats: getStats(sessions)
+        if (empList) {
+          resolvedEmployees = empList.map((d: any) => ({
+            id: d.id || d._id,
+            username: d.username,
+            displayName: d.displayName || d.username,
+            department: d.department || "General Operations",
+            role: d.role || "EMPLOYEE",
+            createdAt: d.createdAt
+          }));
+        }
+
+        if (polList && polList.length > 0) {
+          resolvedPolicies = polList;
+        }
+      } catch (dbQueryErr: any) {
+        console.error("Database query error in /api/admin/events-poll:", dbQueryErr);
+        // Do NOT convert DB query errors silently into empty data
+        return res.status(503).json({
+          status: "error",
+          code: "DB_QUERY_FAILURE",
+          message: "Database query failed during telemetry poll. Preserving active state.",
+          details: dbQueryErr.message
         });
-      } catch (err) {
-        console.error("Error in events-poll:", err);
       }
-    }
-    const allPols = await getAllPolicies();
-    res.json({
-      status: "success",
-      sessions,
-      alerts,
-      employees: await getRegisteredEmployees(),
-      policies: allPols,
-      stats: getStats(sessions)
-    });
-  });
-
-  // ==========================================
-  // CLOSED-LOOP SECURITY POLICY ENDPOINTS
-  // ==========================================
-
-  app.get("/api/admin/policies", requireAdmin, async (req, res) => {
-    const pols = await getAllPolicies();
-    res.json({ status: "success", policies: pols });
-  });
-
-  app.post("/api/admin/policies/deploy", requireAdmin, async (req, res) => {
-    const { title, trigger, condition, action, threshold, scope, priority, version, sourceEvent } = req.body;
-    if (!title || !action) {
-      return res.status(400).json({ status: "error", message: "Policy title and enforcement action are required." });
-    }
-
-    try {
-      const deployed = await deployNewPolicy({
-        title,
-        trigger: trigger || "Observed Intrusion Behavior",
-        condition: condition || "threatScore >= threshold",
-        action: action || "DECEPTION",
-        threshold: threshold || 50,
-        scope: scope || "GATEWAY_ENFORCEMENT",
-        priority: priority || 1,
-        version: version || 1,
-        sourceEvent: sourceEvent || "AI_ATTACK_ANALYSIS"
+    } else if (process.env.NODE_ENV === "production" && process.env.MONGODB_URI) {
+      // If DB is configured in production but currently disconnected, return error preserving state
+      return res.status(503).json({
+        status: "error",
+        code: "DB_DISCONNECTED",
+        message: "MongoDB connection is initializing or reconnecting.",
+        stats: getStats(sessions),
+        sessions: sessions.length > 0 ? sessions : undefined
       });
-
-      res.json({ status: "success", message: `Policy '${deployed.title}' (${deployed.policyId}) deployed successfully to API Gateway!`, policy: deployed });
-    } catch (err: any) {
-      res.status(400).json({ status: "error", message: err.message || "Policy deployment failed." });
-    }
-  });
-
-  app.patch("/api/admin/policies/:policyId/toggle", requireAdmin, async (req, res) => {
-    const { policyId } = req.params;
-    const { status } = req.body;
-    const newStatus = status === "ACTIVE" ? "ACTIVE" : "INACTIVE";
-
-    if (isDbConnected()) {
-      await (PolicyModel as any).updateOne({ policyId }, { $set: { status: newStatus } }).catch(() => {});
     }
 
-    createAlert("info", `Admin toggled Security Policy [${policyId}] status to ${newStatus}.`, "admin_policy_engine");
-    res.json({ status: "success", policyId, policyStatus: newStatus });
-  });
+    const calculatedStats = getStats(resolvedSessions);
 
-  app.get("/api/admin/audit-events", requireAdmin, async (req, res) => {
-    if (isDbConnected()) {
+    return res.json({
+      status: "success",
+      timestamp: Date.now(),
+      sessions: resolvedSessions,
+      alerts: resolvedAlerts,
+      employees: resolvedEmployees,
+      policies: resolvedPolicies,
+      stats: calculatedStats
+    });
+  } catch (err: any) {
+    console.error("Critical error in /api/admin/events-poll:", err);
+    return res.status(500).json({
+      status: "error",
+      code: "INTERNAL_POLL_ERROR",
+      message: err.message || "Failed to retrieve telemetry events."
+    });
+  }
+});
+
+// ==========================================
+// CLOSED-LOOP SECURITY POLICY ENDPOINTS
+// ==========================================
+
+app.get("/api/admin/policies", requireAdmin, async (req, res) => {
+  const pols = await getAllPolicies();
+  res.json({ status: "success", policies: pols });
+});
+
+app.post("/api/admin/policies/deploy", requireAdmin, async (req, res) => {
+  const { title, trigger, condition, action, threshold, scope, priority, version, sourceEvent } = req.body;
+  if (!title || !action) {
+    return res.status(400).json({ status: "error", message: "Policy title and enforcement action are required." });
+  }
+
+  try {
+    const deployed = await deployNewPolicy({
+      title,
+      trigger: trigger || "Observed Intrusion Behavior",
+      condition: condition || "threatScore >= threshold",
+      action: action || "DECEPTION",
+      threshold: threshold || 50,
+      scope: scope || "GATEWAY_ENFORCEMENT",
+      priority: priority || 1,
+      version: version || 1,
+      sourceEvent: sourceEvent || "AI_ATTACK_ANALYSIS"
+    });
+
+    res.json({ status: "success", message: `Policy '${deployed.title}' (${deployed.policyId}) deployed successfully to API Gateway!`, policy: deployed });
+  } catch (err: any) {
+    res.status(400).json({ status: "error", message: err.message || "Policy deployment failed." });
+  }
+});
+
+app.patch("/api/admin/policies/:policyId/toggle", requireAdmin, async (req, res) => {
+  const { policyId } = req.params;
+  const { status } = req.body;
+  const newStatus = status === "ACTIVE" ? "ACTIVE" : "INACTIVE";
+
+  if (isDbConnected()) {
+    await (PolicyModel as any).updateOne({ policyId }, { $set: { status: newStatus } }).catch(() => {});
+  }
+
+  await createAlert("info", `Admin toggled Security Policy [${policyId}] status to ${newStatus}.`, "admin_policy_engine");
+  res.json({ status: "success", policyId, policyStatus: newStatus });
+});
+
+app.get("/api/admin/audit-events", requireAdmin, async (req, res) => {
+  if (isDbConnected()) {
+    try {
       const dbAudits = await (AuditEventModel as any).find().sort({ _id: -1 }).limit(100).lean();
       if (dbAudits && dbAudits.length > 0) {
         return res.json({ status: "success", auditEvents: dbAudits });
       }
+    } catch (e) {}
+  }
+  res.json({ status: "success", auditEvents: [] });
+});
+
+app.post("/api/admin/simulate/brute", requireAdmin, async (req, res) => {
+  const ip = "185.220.101." + Math.floor(Math.random() * 254 + 1);
+  const userAgent = "Mozilla/5.0 (compatible; BotnetScanner/2.4; +http://recon.net)";
+  const username = "recon_bot_" + Math.random().toString(36).substring(2, 6) + "@threat.org";
+
+  const session = await createSession(username, "Deception", ip, userAgent);
+  session.failedAttempts = 3;
+
+  await addLogEntry(session.id, "Brute Force Threshold Breached", "Repeated failed logins (3 attempts). Silent honeypot diversion activated. [SIMULATION DEMONSTRATION]", 30);
+  await addLogEntry(session.id, "Terminal Command Execution", "Executed: 'whoami' via command interpreter [SIMULATION DEMONSTRATION]", 15);
+  await addLogEntry(session.id, "Read Document Content", "Accessed file 'customer_pii_export_raw.csv'. Format: CSV | Size: 185 KB [SIMULATION DEMONSTRATION]", 30);
+
+  await createAlert("critical", `[SIMULATION DEMO] Botnet infiltration simulation initiated for '${username}'. Diverted to Deception zone.`, session.id);
+
+  res.json({ status: "success", message: "Infiltration simulation triggered.", session });
+});
+
+app.post("/api/admin/simulate/critical", requireAdmin, async (req, res) => {
+  await createAlert(
+    "critical",
+    `[SIMULATION DEMO] POSTURE ALARM: Brute-force credentials-stuffing attack detected targeting LDAP server node. Triggering automated telemetry quarantine.`,
+    "sim_controller"
+  );
+  res.json({ status: "success", message: "Critical alarm injected into live feed." });
+});
+
+app.get("/api/admin/download-report/:sessionId", requireAdmin, async (req, res) => {
+  const { sessionId } = req.params;
+  const session = await findSession(sessionId);
+  if (!session) {
+    return res.status(404).send("Error: Session not found.");
+  }
+
+  let csvContent = "Timestamp,Action,Details,Threat Score Contribution\n";
+  (session.logs || []).forEach((log: any) => {
+    const escapedDetails = (log.details || "").replace(/"/g, '""');
+    csvContent += `"${log.timestamp}","${log.action}","${escapedDetails}",${log.threatPoints}\n`;
+  });
+
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", `attachment; filename=aegis_telemetry_report_${sessionId}.csv`);
+  res.status(200).send(csvContent);
+});
+
+app.post("/api/admin/summary/:sessionId", requireAdmin, async (req, res) => {
+  const { sessionId } = req.params;
+  const session = await findSession(sessionId);
+  if (!session) {
+    return res.status(404).json({ status: "error", message: "Session not found." });
+  }
+
+  session.generatingSummary = true;
+  broadcastToAdmins("session_update", session);
+
+  try {
+    const summary = await generateAttackerSummary(session);
+    session.aiSummary = summary;
+    session.generatingSummary = false;
+    if (isDbConnected()) {
+      await SessionModel.updateOne({ id: sessionId }, { $set: { aiSummary: summary } }).catch(() => {});
     }
-    res.json({ status: "success", auditEvents: [] });
-  });
-
-  app.post("/api/admin/simulate/brute", requireAdmin, (req, res) => {
-    const ip = "185.220.101." + Math.floor(Math.random() * 254 + 1);
-    const userAgent = "Mozilla/5.0 (compatible; BotnetScanner/2.4; +http://recon.net)";
-    const username = "recon_bot_" + Math.random().toString(36).substring(2, 6) + "@threat.org";
-
-    const session = createSession(username, "Deception", ip, userAgent);
-    session.failedAttempts = 3;
-
-    addLogEntry(session.id, "Brute Force Threshold Breached", "Repeated failed logins (3 attempts). Silent honeypot diversion activated.", 30);
-    
-    setTimeout(() => {
-      addLogEntry(session.id, "Terminal Command Execution", "Executed: 'whoami' via command interpreter", 15);
-    }, 100);
-
-    setTimeout(() => {
-      addLogEntry(session.id, "Read Document Content", "Accessed file 'customer_pii_export_raw.csv'. Format: CSV | Size: 185 KB", 30);
-    }, 200);
-
-    res.json({ status: "success", message: "Infiltration simulation triggered.", session });
-  });
-
-  app.post("/api/admin/simulate/critical", requireAdmin, (req, res) => {
-    createAlert(
-      "critical",
-      `POSTURE ALARM: Brute-force credentials-stuffing attack detected targeting LDAP server node. Triggering automated telemetry quarantine.`,
-      "sim_controller"
-    );
-    res.json({ status: "success", message: "Critical alarm injected into live feed." });
-  });
-
-  app.get("/api/admin/download-report/:sessionId", requireAdmin, (req, res) => {
-    const { sessionId } = req.params;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session) {
-      return res.status(404).send("Error: Session not found.");
-    }
-
-    let csvContent = "Timestamp,Action,Details,Threat Score Contribution\n";
-    session.logs.forEach(log => {
-      const escapedDetails = log.details.replace(/"/g, '""');
-      csvContent += `"${log.timestamp}","${log.action}","${escapedDetails}",${log.threatPoints}\n`;
-    });
-
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename=aegis_telemetry_report_${sessionId}.csv`);
-    res.status(200).send(csvContent);
-  });
-
-  app.post("/api/admin/summary/:sessionId", requireAdmin, async (req, res) => {
-    const { sessionId } = req.params;
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session) {
-      return res.status(404).json({ status: "error", message: "Session not found." });
-    }
-
-    session.generatingSummary = true;
     broadcastToAdmins("session_update", session);
+    return res.json({ status: "success", summary });
+  } catch (err: any) {
+    session.generatingSummary = false;
+    broadcastToAdmins("session_update", session);
+    return res.status(500).json({ status: "error", message: err.message || "Failed to generate report." });
+  }
+});
 
-    try {
-      const summary = await generateAttackerSummary(session);
-      session.aiSummary = summary;
-      session.generatingSummary = false;
-      broadcastToAdmins("session_update", session);
-      return res.json({ status: "success", summary });
-    } catch (err: any) {
-      session.generatingSummary = false;
-      broadcastToAdmins("session_update", session);
-      return res.status(500).json({ status: "error", message: err.message || "Failed to generate report." });
-    }
+app.get("/api/admin/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  addSseClient(res);
+
+  const intervalId = setInterval(() => {
+    res.write(": ping\n\n");
+  }, 25000);
+
+  req.on("close", () => {
+    clearInterval(intervalId);
+    removeSseClient(res);
   });
+});
 
-  app.get("/api/admin/events", (req, res) => {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
+// Reverse Proxy Route (Synthetic Decoy Interception)
+app.all("/api/proxy/*", async (req, res) => {
+  const targetPath = req.params[0] || "";
+  const sessionId = (req.headers["x-session-id"] as string) || (req.query.sessionId as string);
+  const session = sessionId ? await findSession(sessionId) : null;
 
-    addSseClient(res);
-
-    const intervalId = setInterval(() => {
-      res.write(": ping\n\n");
-    }, 25000);
-
-    req.on("close", () => {
-      clearInterval(intervalId);
-      removeSseClient(res);
-    });
-  });
-
-  // Reverse Proxy Route (Synthetic Decoy Interception)
-  app.all("/api/proxy/*", async (req, res) => {
-    const targetPath = req.params[0] || "";
-    const sessionId = (req.headers["x-session-id"] as string) || (req.query.sessionId as string);
-    const session = sessions.find(s => s.id === sessionId);
-
-    if (session && session.status === "Deception") {
-      addLogEntry(session.id, "Proxy Access Intercepted", `Intercepted query to '/${targetPath}'. Silently served synthetic honeypot decoy data.`, 25);
-      return res.json({
-        status: "success",
-        deceptionActive: true,
-        securityPosture: "DECEPTION_SHADOW_CONTAINMENT",
-        data: [
-          { id: 901, name: "DECOY_EXECUTIVE_PII", email: "trap_exec@svit.sec", salary: "$185,000" },
-          { id: 902, name: "TRAP_ADMIN_CREDENTIAL", email: "aws_root_trap@svit.sec", key: "AKIAIOSFODNN7EXAMPLE" }
-        ],
-        message: "Traffic containment active. Attacker served synthetic decoy response."
-      });
-    }
-
-    try {
-      const targetUrl = `https://jsonplaceholder.typicode.com/${targetPath || "users"}`;
-      const response = await fetch(targetUrl);
-      const data = await response.json();
-      
-      if (session) {
-        addLogEntry(session.id, "Proxy Request Forwarded", `Forwarded legitimate request '/${targetPath}' to target backend.`, 0);
-      }
-
-      res.json({
-        status: "success",
-        deceptionActive: false,
-        securityPosture: "GENUINE_FORWARDED",
-        targetUrl,
-        data
-      });
-    } catch (err: any) {
-      res.status(500).json({ status: "error", message: "Failed to forward request to target server." });
-    }
-  });
-
-  // ==========================================
-  // VITE DEV SERVER & PRODUCTION ASSETS ROUTING
-  // ==========================================
-
-  if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa"
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+  if (session && session.status === "Deception") {
+    await addLogEntry(session.id, "Proxy Access Intercepted", `Intercepted query to '/${targetPath}'. Silently served synthetic honeypot decoy data.`, 25);
+    return res.json({
+      status: "success",
+      deceptionActive: true,
+      securityPosture: "DECEPTION_SHADOW_CONTAINMENT",
+      data: [
+        { id: 901, name: "DECOY_EXECUTIVE_PII", email: "trap_exec@svit.sec", salary: "$185,000" },
+        { id: 902, name: "TRAP_ADMIN_CREDENTIAL", email: "aws_root_trap@svit.sec", key: "AKIAIOSFODNN7EXAMPLE" }
+      ],
+      message: "Traffic containment active. Attacker served synthetic decoy response."
     });
   }
 
-  if (!process.env.VERCEL) {
+  try {
+    const targetUrl = `https://jsonplaceholder.typicode.com/${targetPath || "users"}`;
+    const response = await fetch(targetUrl);
+    const data = await response.json();
+    
+    if (session) {
+      await addLogEntry(session.id, "Proxy Request Forwarded", `Forwarded legitimate request '/${targetPath}' to target backend.`, 0);
+    }
+
+    res.json({
+      status: "success",
+      deceptionActive: false,
+      securityPosture: "GENUINE_FORWARDED",
+      targetUrl,
+      data
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: "error", message: "Failed to forward request to target server." });
+  }
+});
+
+// ==========================================
+// VITE DEV SERVER & PRODUCTION ASSETS ROUTING
+// ==========================================
+
+if (!process.env.VERCEL) {
+  (async () => {
+    await connectMongoDB();
+    await loadEmployeesFromDb();
+
+    if (process.env.NODE_ENV !== "production") {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa"
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
+
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Express multi-device server running on port ${PORT}`);
     });
-  }
+  })().catch(err => {
+    console.error("Server startup error:", err);
+  });
 }
-
-startServer();
 
 export default app;

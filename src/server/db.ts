@@ -232,7 +232,31 @@ export const AuditEventModel = mongoose.models.AuditEvent || mongoose.model<IAud
 
 let isConnected = false;
 
-export async function connectMongoDB() {
+// Global connection cache across serverless function invocations
+declare global {
+  var mongooseConn: { conn: typeof mongoose | null; promise: Promise<boolean> | null } | undefined;
+}
+
+let cached = global.mongooseConn;
+if (!cached) {
+  cached = global.mongooseConn = { conn: null, promise: null };
+}
+
+mongoose.connection.on("connected", () => {
+  isConnected = true;
+});
+
+mongoose.connection.on("disconnected", () => {
+  isConnected = false;
+  if (cached) cached.promise = null;
+});
+
+mongoose.connection.on("error", () => {
+  isConnected = false;
+  if (cached) cached.promise = null;
+});
+
+export async function connectMongoDB(): Promise<boolean> {
   const uri = process.env.MONGODB_URI;
 
   if (!uri || uri.includes("YOUR_MONGODB_URI") || uri.includes("placeholder")) {
@@ -245,21 +269,40 @@ export async function connectMongoDB() {
     return true;
   }
 
+  if (cached?.promise) {
+    try {
+      return await cached.promise;
+    } catch {
+      cached.promise = null;
+    }
+  }
+
   console.log("⏳ Connecting to MongoDB Cloud Database...");
 
-  try {
-    await mongoose.connect(uri, { serverSelectionTimeoutMS: 4000, connectTimeoutMS: 4000 });
-    isConnected = true;
-    console.log("✅ Successfully connected to MongoDB Cloud Database!");
+  cached!.promise = (async () => {
+    try {
+      await mongoose.connect(uri, {
+        serverSelectionTimeoutMS: 5000,
+        connectTimeoutMS: 5000,
+        socketTimeoutMS: 20000,
+        maxPoolSize: 10
+      });
+      isConnected = true;
+      cached!.conn = mongoose;
+      console.log("✅ Successfully connected to MongoDB Cloud Database!");
 
-    bootstrapInitialAdmin().catch(() => {});
+      bootstrapInitialAdmin().catch(() => {});
 
-    return true;
-  } catch (err: any) {
-    console.error("❌ Failed to connect to MongoDB Cloud Database:", err.message || err);
-    isConnected = false;
-    return false;
-  }
+      return true;
+    } catch (err: any) {
+      console.error("❌ Failed to connect to MongoDB Cloud Database:", err.message || err);
+      isConnected = false;
+      cached!.promise = null;
+      return false;
+    }
+  })();
+
+  return await cached!.promise;
 }
 
 async function bootstrapInitialAdmin() {
@@ -292,6 +335,6 @@ async function bootstrapInitialAdmin() {
   }
 }
 
-export function isDbConnected() {
+export function isDbConnected(): boolean {
   return isConnected || mongoose.connection.readyState === 1;
 }

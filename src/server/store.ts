@@ -94,7 +94,7 @@ export function broadcastToAdmins(type: string, data: any) {
 }
 
 // Create a new security session with persistent UUID
-export function createSession(username: string, status: 'Genuine' | 'Deception', ip: string, userAgent: string, role: string = "USER", userId?: string): Session {
+export async function createSession(username: string, status: 'Genuine' | 'Deception', ip: string, userAgent: string, role: string = "USER", userId?: string): Promise<Session> {
   const uuid = "sess_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
   const now = new Date().toISOString();
   
@@ -117,30 +117,34 @@ export function createSession(username: string, status: 'Genuine' | 'Deception',
 
   // Sync to MongoDB Cloud Atlas
   if (isDbConnected()) {
-    SessionModel.create({
-      id: session.id,
-      sessionId: session.id,
-      userId: userId || "",
-      username: session.username,
-      role: role,
-      status: session.status,
-      threatScore: session.threatScore,
-      failedAttempts: 0,
-      ip: session.ip,
-      userAgent: session.userAgent,
-      loginTime: session.loginTime,
-      lastActivityAt: now,
-      logs: []
-    }).catch(e => console.error("Error saving session to MongoDB:", e));
+    try {
+      await SessionModel.create({
+        id: session.id,
+        sessionId: session.id,
+        userId: userId || "",
+        username: session.username,
+        role: role,
+        status: session.status,
+        threatScore: session.threatScore,
+        failedAttempts: 0,
+        ip: session.ip,
+        userAgent: session.userAgent,
+        loginTime: session.loginTime,
+        lastActivityAt: now,
+        logs: []
+      });
+    } catch (e) {
+      console.error("Error saving session to MongoDB:", e);
+    }
   }
 
   // Add initial log entry
-  addLogEntry(session.id, 'Session Initiated', `User logged in. Security classification: ${status}.`, status === 'Deception' ? 50 : 0);
+  await addLogEntry(session.id, 'Session Initiated', `User logged in. Security classification: ${status}.`, status === 'Deception' ? 50 : 0);
 
   if (status === 'Deception') {
-    createAlert('critical', `Policy Enforcement: Silently diverted traffic for '${username}' into Shadow Deception Zone.`, session.id);
+    await createAlert('critical', `Policy Enforcement: Silently diverted traffic for '${username}' into Shadow Deception Zone.`, session.id);
   } else {
-    createAlert('info', `Legitimate user session established for '${username}'.`, session.id);
+    await createAlert('info', `Legitimate user session established for '${username}'.`, session.id);
   }
 
   return session;
@@ -187,7 +191,7 @@ export async function addLogEntry(sessionId: string, action: string, details: st
     if (timeDiff < 1500) {
       points += 20;
       details += ' [ALGORITHM DETECTION: Rapid automated navigation pattern detected (+20 threat)]';
-      createAlert('warning', `Suspicious behavior on Session ${session.id}: Rapid automated click actions (${timeDiff}ms).`, session.id);
+      await createAlert('warning', `Suspicious behavior on Session ${session.id}: Rapid automated click actions (${timeDiff}ms).`, session.id);
     }
   }
 
@@ -195,7 +199,7 @@ export async function addLogEntry(sessionId: string, action: string, details: st
   if (action === 'Reveal Vault Secrets' && session.logs.length <= 2) {
     points += 25;
     details += ' [ALGORITHM DETECTION: Out-of-sequence navigation. Secrets queried on session initialization (+25 threat)]';
-    createAlert('warning', `Out-of-sequence security action: Vault revealed early in session.`, session.id);
+    await createAlert('warning', `Out-of-sequence security action: Vault revealed early in session.`, session.id);
   }
 
   const logId = "log_" + crypto.randomUUID().replace(/-/g, "").substring(0, 12);
@@ -208,19 +212,19 @@ export async function addLogEntry(sessionId: string, action: string, details: st
   };
 
   session.logs.push(log);
-  session.threatScore = Math.min(100, session.threatScore + points);
+  session.threatScore = Math.min(100, Math.max(0, session.threatScore + points));
 
   if (points >= 25 && session.status === 'Deception') {
-    createAlert('critical', `Intrusion Alert: Attacker performed high-threat action '${action}' in Shadow Zone. Details: ${details}`, session.id);
+    await createAlert('critical', `Intrusion Alert: Attacker performed high-threat action '${action}' in Shadow Zone. Details: ${details}`, session.id);
   }
 
   // Auto-generate AI Summary in background if session has actions
   if (!session.generatingSummary && session.logs.length >= 2) {
-    generateAttackerSummary(session).then(summary => {
+    generateAttackerSummary(session).then(async summary => {
       if (session) {
         session.aiSummary = summary;
         if (isDbConnected()) {
-          SessionModel.updateOne({ id: sessionId }, { $set: { aiSummary: summary } }).catch(() => {});
+          await SessionModel.updateOne({ id: sessionId }, { $set: { aiSummary: summary } }).catch(() => {});
         }
         broadcastToAdmins('session_update', session);
       }
@@ -229,24 +233,28 @@ export async function addLogEntry(sessionId: string, action: string, details: st
 
   // Sync log & threat score update to MongoDB Cloud Atlas
   if (isDbConnected()) {
-    SessionModel.updateOne(
-      { id: sessionId },
-      { 
-        $set: { 
-          logs: session.logs, 
-          threatScore: session.threatScore, 
-          aiSummary: session.aiSummary,
-          lastActivityAt: timestamp
-        } 
-      }
-    ).catch(e => console.error("Error updating session telemetry in MongoDB:", e));
+    try {
+      await SessionModel.updateOne(
+        { id: sessionId },
+        { 
+          $set: { 
+            logs: session.logs, 
+            threatScore: session.threatScore, 
+            aiSummary: session.aiSummary,
+            lastActivityAt: timestamp
+          } 
+        }
+      );
+    } catch (e) {
+      console.error("Error updating session telemetry in MongoDB:", e);
+    }
   }
 
   broadcastToAdmins('session_update', session);
 }
 
 // Create an alert
-export function createAlert(type: 'info' | 'warning' | 'critical', message: string, sessionId: string) {
+export async function createAlert(type: 'info' | 'warning' | 'critical', message: string, sessionId: string) {
   const alertId = "alert_" + crypto.randomUUID().replace(/-/g, "").substring(0, 12);
   const alert: Alert = {
     id: alertId,
@@ -260,26 +268,34 @@ export function createAlert(type: 'info' | 'warning' | 'critical', message: stri
   if (alerts.length > 50) alerts.pop();
 
   if (isDbConnected()) {
-    AlertModel.create(alert).catch(e => console.error("Error saving alert to MongoDB:", e));
+    try {
+      await AlertModel.create(alert);
+    } catch (e) {
+      console.error("Error saving alert to MongoDB:", e);
+    }
   }
 
   broadcastToAdmins('new_alert', alert);
+  return alert;
 }
 
 // Terminate / end a session
-export function endSession(sessionId: string) {
+export async function endSession(sessionId: string) {
   const index = sessions.findIndex(s => s.id === sessionId);
   if (index !== -1) {
     sessions.splice(index, 1);
-
-    if (isDbConnected()) {
-      SessionModel.deleteOne({ id: sessionId }).catch(e => console.error("Error deleting session from MongoDB:", e));
-    }
-
-    broadcastToAdmins('session_deleted', sessionId);
-    return true;
   }
-  return false;
+
+  if (isDbConnected()) {
+    try {
+      await SessionModel.deleteOne({ id: sessionId });
+    } catch (e) {
+      console.error("Error deleting session from MongoDB:", e);
+    }
+  }
+
+  broadcastToAdmins('session_deleted', sessionId);
+  return true;
 }
 
 // Aggregate Dashboard metrics

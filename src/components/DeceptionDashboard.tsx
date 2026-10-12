@@ -80,12 +80,22 @@ export default function DeceptionDashboard({ session, onLogout }: DeceptionDashb
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
 
+  // Authentication & session headers helper for stealth telemetry
+  const getDeceptionHeaders = () => {
+    const token = localStorage.getItem("jwt_token") || "";
+    return {
+      "Content-Type": "application/json",
+      "x-session-id": session?.id || "",
+      ...(token ? { "Authorization": `Bearer ${token}` } : {})
+    };
+  };
+
   // Silent reporting tracker
   const silentReport = async (action: string, details: string, threatPoints: number) => {
     try {
       await fetch(`/api/deception/action/${session.id}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getDeceptionHeaders(),
         body: JSON.stringify({ action, details, threatPoints })
       });
     } catch (e) {
@@ -101,7 +111,9 @@ export default function DeceptionDashboard({ session, onLogout }: DeceptionDashb
 
   const loadFiles = async () => {
     try {
-      const res = await fetch(`/api/deception/files/${session.id}`);
+      const res = await fetch(`/api/deception/files/${session.id}`, {
+        headers: getDeceptionHeaders()
+      });
       const data = await res.json();
       if (data.status === "success") {
         setFiles(data.files);
@@ -136,7 +148,9 @@ export default function DeceptionDashboard({ session, onLogout }: DeceptionDashb
 
     try {
       // First try calling backend
-      const res = await fetch(`/api/deception/file/${session.id}/${fileName}`);
+      const res = await fetch(`/api/deception/file/${session.id}/${encodeURIComponent(fileName)}`, {
+        headers: getDeceptionHeaders()
+      });
       const data = await res.json();
       if (data.status === "success") {
         setTimeout(() => {
@@ -144,6 +158,8 @@ export default function DeceptionDashboard({ session, onLogout }: DeceptionDashb
           setLoadingFile(false);
           silentReport("Document Decrypted Successfully", `Finished rendering secure document viewer for '${fileName}'`, 10);
         }, 1200);
+      } else {
+        throw new Error(data.message || "Failed to load file");
       }
     } catch (e) {
       // Fallback to local files if recently uploaded
@@ -353,7 +369,7 @@ Security Level:    RESTRICTED - LEVEL 4
     try {
       const res = await fetch(`/api/deception/terminal/${session.id}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getDeceptionHeaders(),
         body: JSON.stringify({ command: cmdLine })
       });
       const data = await res.json();
@@ -380,10 +396,17 @@ Security Level:    RESTRICTED - LEVEL 4
     setSearching(true);
     const query = searchQuery.trim().toLowerCase();
 
-    // Trigger threat tracking based on keywords
+    // Trigger threat tracking based on keywords and report via backend API
     const highThreatKeywords = ["admin", "root", "password", "key", "secret", "db", "leak", "hack", "payment", "credit"];
     const matchesKeyword = highThreatKeywords.some(kw => query.includes(kw));
     silentReport("Global Search Console Query", `Searched deception logs database for query: '${searchQuery}'`, matchesKeyword ? 25 : 5);
+
+    // Call server-side search endpoint to trigger persistent server-side deception telemetry
+    fetch(`/api/deception/search/${session.id}`, {
+      method: "POST",
+      headers: getDeceptionHeaders(),
+      body: JSON.stringify({ query: searchQuery.trim() })
+    }).catch(err => console.warn("Backend search telemetry ping:", err));
 
     setTimeout(() => {
       const results: any[] = [];

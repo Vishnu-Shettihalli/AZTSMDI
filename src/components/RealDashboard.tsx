@@ -57,10 +57,22 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
   const [submittedFeedbacks, setSubmittedFeedbacks] = useState<{ id: string; category: string; text: string; date: string }[]>([]);
   const [showFeedbackToast, setShowFeedbackToast] = useState(false);
 
+  // Helper to attach session and JWT headers
+  const getEmployeeHeaders = () => {
+    const token = localStorage.getItem("jwt_token") || "";
+    return {
+      "Content-Type": "application/json",
+      "x-session-id": session?.id || "",
+      ...(token ? { "Authorization": `Bearer ${token}` } : {})
+    };
+  };
+
   useEffect(() => {
     async function fetchRealData() {
       try {
-        const res = await fetch(`/api/real/dashboard/${session.id}`);
+        const res = await fetch(`/api/real/dashboard/${session.id}`, {
+          headers: getEmployeeHeaders()
+        });
         const json = await res.json();
         if (json.status === "success" && json.data) {
           setData(json.data);
@@ -86,7 +98,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
     try {
       await fetch(`/api/employee/tasks/${taskId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: getEmployeeHeaders(),
         body: JSON.stringify({ sessionId: session.id, completed: nextState })
       });
     } catch (e) {
@@ -103,7 +115,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
     try {
       const res = await fetch("/api/employee/tasks", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getEmployeeHeaders(),
         body: JSON.stringify({ sessionId: session.id, title })
       });
       const json = await res.json();
@@ -121,7 +133,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
     try {
       await fetch(`/api/employee/tasks/${id}`, {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
+        headers: getEmployeeHeaders(),
         body: JSON.stringify({ sessionId: session.id })
       });
     } catch (e) {
@@ -144,7 +156,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
     try {
       const res = await fetch("/api/employee/projects", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getEmployeeHeaders(),
         body: JSON.stringify({ sessionId: session.id, code, name, schedule })
       });
       const json = await res.json();
@@ -166,7 +178,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
     try {
       const res = await fetch("/api/employee/tickets", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getEmployeeHeaders(),
         body: JSON.stringify({ sessionId: session.id, category, text })
       });
       const json = await res.json();
