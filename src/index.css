@@ -1,23 +1,29 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-display: "Inter", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 @layer base {
   body {
     @apply antialiased font-sans bg-[#f0f4f9] text-slate-800 selection:bg-blue-100 selection:text-blue-900;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    font-feature-settings: "kern", "liga";
+    letter-spacing: -0.01em;
   }
 
   h1, h2, h3, h4, .font-display {
     font-family: var(--font-display);
+    letter-spacing: -0.02em;
   }
 
-  /* Sleek modern cool-slate scrollbars */
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* Scrollbars */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
@@ -111,4 +117,3 @@
 .animate-marquee:hover {
   animation-play-state: paused;
 }
-

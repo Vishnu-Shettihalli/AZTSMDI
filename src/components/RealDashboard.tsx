@@ -33,18 +33,18 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
   
   // Employee tasks checklist
   const [tasks, setTasks] = useState([
-    { id: 101, title: "Review quarterly IT security compliance report", completed: true },
-    { id: 102, title: "Approve server maintenance window for Rack 4", completed: false },
-    { id: 103, title: "Submit annual employee performance self-appraisal", completed: false },
-    { id: 104, title: "Complete mandatory zero-trust security refresher course", completed: true }
+    { id: 101, title: "Check and submit the quarterly IT compliance report", completed: true },
+    { id: 102, title: "Schedule server maintenance for Rack 4 - confirm with team", completed: false },
+    { id: 103, title: "Fill out annual self-appraisal form before Friday", completed: false },
+    { id: 104, title: "Complete the mandatory network security training module", completed: true }
   ]);
   const [newTaskTitle, setNewTaskTitle] = useState("");
   
   // Internal projects list
   const [projects, setProjects] = useState([
-    { code: "PRJ-901", name: "Campus Network Infrastructure Upgrade", schedule: "Deadline: Aug 15", status: "Active" },
-    { code: "PRJ-882", name: "Employee Directory & SSO Modernization", schedule: "Deadline: Sep 01", status: "Active" },
-    { code: "PRJ-750", name: "Institutional Data Backup & DR Sync", schedule: "Deadline: Oct 10", status: "Pending Review" }
+    { code: "PRJ-901", name: "Campus Network Infrastructure Upgrade", schedule: "Due: Aug 15", status: "Active" },
+    { code: "PRJ-882", name: "Employee Directory & Single Sign-On Revamp", schedule: "Due: Sep 01", status: "Active" },
+    { code: "PRJ-750", name: "College Data Backup & Disaster Recovery", schedule: "Due: Oct 10", status: "In Review" }
   ]);
   const [showAddProject, setShowAddProject] = useState(false);
   const [addProjectCode, setAddProjectCode] = useState("");
@@ -235,7 +235,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
             className="fixed top-20 right-4 bg-emerald-50 text-emerald-800 border border-emerald-200 px-4 py-2.5 rounded-xl shadow-lg flex items-center gap-2 z-50 text-xs font-bold font-mono"
           >
             <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-            SUCCESS: IT SERVICE REQUEST TRANSMITTED SECURELY
+            Ticket submitted!
           </motion.div>
         )}
       </AnimatePresence>
@@ -249,11 +249,11 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
           <div>
             <div className="flex items-center gap-2 mb-1">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <p className="text-[10px] font-mono font-bold tracking-widest text-emerald-700 uppercase">Authenticated Staff SSO Portal</p>
+              <p className="text-[10px] font-mono font-bold tracking-widest text-emerald-700 uppercase">Staff Portal — Authenticated</p>
             </div>
-            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">Sai Vidya Institute of Technology Employee Portal</h1>
+            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">SVIT Employee Dashboard</h1>
             <p className="text-xs text-slate-600 mt-0.5">
-              Employee Account: <span className="font-mono underline text-slate-800 font-semibold">{session.username}</span> | Staff ID: <span className="font-mono text-emerald-700 font-bold">SVIT_EMP_2026_9201</span>
+              Logged in as: <span className="font-mono underline text-slate-800 font-semibold">{session.username}</span> | Staff ID: <span className="font-mono text-emerald-700 font-bold">SVIT-EMP-9201</span>
             </p>
           </div>
         </div>
@@ -282,7 +282,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
           
           <div className="flex items-center gap-2.5 border-b border-slate-200/80 pb-3.5">
             <UserCheck className="w-4 h-4 text-blue-600" />
-            <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">Employee Overview</h2>
+            <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">Your Profile</h2>
           </div>
 
           <div className="space-y-3.5 text-xs">
@@ -310,7 +310,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
           <div className="bg-slate-50/80 border border-slate-200/70 p-3 rounded-xl space-y-1.5">
             <div className="flex justify-between text-xs">
               <span className="text-slate-500 font-mono text-[10px]">Zero-Trust Staff Clearance:</span>
-              <span className="font-semibold text-emerald-700 font-bold font-mono">LEVEL 4 APPROVED</span>
+              <span className="font-semibold text-emerald-700 font-bold font-mono">ACCESS APPROVED</span>
             </div>
             <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
               <div className="h-full bg-emerald-500 rounded-full" style={{ width: "100%" }}></div>
@@ -323,14 +323,14 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
           <div className="flex justify-between items-center border-b border-slate-200/80 pb-3.5">
             <div className="flex items-center gap-2.5">
               <FolderKanban className="w-4 h-4 text-blue-600" />
-              <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">Institutional Projects & Tasks</h2>
+              <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">My Projects</h2>
             </div>
 
             <button
               onClick={() => setShowAddProject(!showAddProject)}
               className="flex items-center gap-1 px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-[10px] font-bold rounded-lg border border-blue-200 text-blue-700 transition-colors cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" /> Log New Initiative
+              <Plus className="w-3.5 h-3.5" /> Add Project
             </button>
           </div>
 
@@ -380,7 +380,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
                 <tr className="text-slate-500 uppercase tracking-wider font-mono text-[10px]">
                   <th className="font-medium pb-2">Code</th>
                   <th className="font-medium pb-2">Project Name</th>
-                  <th className="font-medium pb-2">Schedule Timeline</th>
+                  <th className="font-medium pb-2">Timeline</th>
                   <th className="font-medium pb-2 text-right">Status</th>
                   <th className="font-medium pb-2 text-right">Actions</th>
                 </tr>
@@ -418,7 +418,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
           <div className="flex justify-between items-center border-b border-slate-200/80 pb-3.5">
             <div className="flex items-center gap-2.5">
               <CheckCircle2 className="w-4.5 h-4.5 text-blue-600" />
-              <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">Employee Operations Checklist</h2>
+              <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">My Tasks</h2>
             </div>
             <span className="text-[10px] bg-blue-50 border border-blue-200 px-2 py-0.5 rounded font-mono text-blue-700 font-semibold">
               {tasks.filter(t => t.completed).length} / {tasks.length} Completed
@@ -430,7 +430,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
               type="text"
               value={newTaskTitle}
               onChange={(e) => setNewTaskTitle(e.target.value)}
-              placeholder="Add employee task..."
+              placeholder="Add a new task..."
               className="flex-1 bg-slate-50/70 border border-slate-200 rounded-lg p-2 focus:outline-none focus:border-blue-500 text-slate-800 placeholder-slate-400"
             />
             <button
@@ -474,7 +474,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
         <div className="bg-white/90 backdrop-blur-md border border-slate-200/80 rounded-2xl p-6 space-y-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
           <div className="flex items-center gap-2.5 border-b border-slate-200/80 pb-3.5">
             <FileText className="w-4.5 h-4.5 text-blue-600" />
-            <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">Employee IT Helpdesk Gate</h2>
+            <h2 className="font-bold text-sm text-slate-800 uppercase tracking-wider font-mono">IT Support Tickets</h2>
           </div>
 
           <form onSubmit={handleFeedbackSubmit} className="space-y-3.5 text-xs">
@@ -495,7 +495,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
               <div className="space-y-1">
                 <label className="text-slate-500 font-mono text-[9px] uppercase font-semibold">Tunnel Security</label>
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-emerald-700 font-mono font-bold">
-                  ● LINK ENCRYPTED
+                  ✔ Connection Secure
                 </div>
               </div>
             </div>
@@ -505,7 +505,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
               <textarea
                 value={feedbackText}
                 onChange={(e) => setFeedbackText(e.target.value)}
-                placeholder="Submit ticket inquiries directly to the IT operations desk..."
+                placeholder="Describe your issue or request here..."
                 rows={3}
                 className="w-full bg-slate-50/70 border border-slate-200 rounded-lg p-2.5 text-slate-800 placeholder-slate-400 focus:outline-none focus:border-blue-500 text-xs"
               />

@@ -88,31 +88,31 @@ export default function App() {
           {/* Logo & Title */}
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 bg-gradient-to-br from-blue-600 via-indigo-600 to-cyan-500 rounded-xl flex items-center justify-center text-white shadow-md font-extrabold text-xs tracking-tight border border-blue-400/30 shrink-0">
-              ZT
+              AZ
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 flex items-center gap-1.5">
-                  ShadowGate Portal
+                  AZTSMDI
                 </h1>
                 <span className="hidden sm:inline-flex text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full border border-blue-200 font-mono font-bold tracking-wider uppercase items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping" />
-                  Active
+                  Live
                 </span>
               </div>
               <p className="text-[10px] sm:text-[11px] text-slate-500 font-sans flex items-center gap-1.5">
                 {userRole === "admin" ? (
                   <span className="text-amber-700 font-bold flex items-center gap-1">
                     <Smartphone className="w-3 h-3 text-amber-600" />
-                    SOC Admin Threat Intelligence Center
+                    Admin &mdash; Security Dashboard
                   </span>
                 ) : userRole === "user" ? (
                   <span className="text-blue-700 font-medium flex items-center gap-1">
                     <Laptop className="w-3 h-3 text-blue-600" />
-                    Employee Internal Access Gateway
+                    Employee Portal
                   </span>
                 ) : (
-                  <span>Zero-Trust Deception Security Gateway</span>
+                  <span>Zero Trust Deception System &mdash; SVIT Major Project</span>
                 )}
               </p>
             </div>
@@ -172,7 +172,7 @@ export default function App() {
         <div className="max-w-4xl mx-auto space-y-1">
           <p className="font-bold text-slate-700 uppercase tracking-widest text-[10px] font-mono flex items-center justify-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-            Zero-Trust Adaptive Deception Infrastructure • SVIT Major Project
+            AZTSMDI — Zero Trust Deception System &bull; SVIT Dept. of CSE &bull; 2025–26
           </p>
         </div>
       </footer>

@@ -68,9 +68,9 @@ export default function DeceptionDashboard({ session, onLogout }: DeceptionDashb
 
   // Terminal State & Auto-scroll Ref
   const [cmdHistory, setCmdHistory] = useState<{ type: "cmd" | "out" | "error"; text: string }[]>([
-    { type: "out", text: "Deception Node v1.0 Shell" },
-    { type: "out", text: "Initializing high-fidelity isolation sandbox node... ONLINE." },
-    { type: "out", text: "Privileges: ROOT / ADMINISTRATOR. Type 'help' to review diagnostics commands." }
+    { type: "out", text: "SVIT Internal Systems Shell v2.1" },
+    { type: "out", text: "Connecting to restricted node... done." },
+    { type: "out", text: "Logged in as: root. Type 'help' to see available commands." }
   ]);
   const [currentCmd, setCurrentCmd] = useState("");
   const termEndRef = useRef<HTMLDivElement>(null);
@@ -442,10 +442,10 @@ Security Level:    RESTRICTED - LEVEL 4
       
       {/* Immersive Cyber-Slate Header */}
       <div className="bg-white/90 backdrop-blur-md border border-slate-200/80 rounded-2xl p-6 relative overflow-hidden flex flex-col md:flex-row justify-between items-start md:items-center gap-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
-        <div className="absolute top-0 right-0 w-36 h-36 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"></div>
+        <div className="absolute top-0 right-0 w-36 h-36 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
         
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-indigo-50/80 border border-indigo-200/80 rounded-xl flex items-center justify-center text-indigo-600 shrink-0 shadow-2xs">
+          <div className="w-12 h-12 bg-blue-50/80 border border-blue-200/80 rounded-xl flex items-center justify-center text-blue-600 shrink-0 shadow-2xs">
             <LockOpen className="w-6 h-6 animate-pulse" />
           </div>
           <div>
@@ -453,7 +453,7 @@ Security Level:    RESTRICTED - LEVEL 4
               <span className="w-2 h-2 rounded-full bg-indigo-600 animate-ping"></span>
               <p className="text-[10px] font-mono font-bold tracking-widest text-indigo-700 uppercase">SVIT Corporate Internal Administration Activated</p>
             </div>
-            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">Admin Deception Console</h1>
+            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">Administrative Console</h1>
             <p className="text-xs text-slate-600 mt-0.5">
               Secure Tunnel Ref: <span className="font-mono text-indigo-700 font-semibold">{session.id}</span> | Identity: <span className="font-mono underline text-slate-800 font-semibold">{session.username}</span>
             </p>
@@ -477,7 +477,7 @@ Security Level:    RESTRICTED - LEVEL 4
           
           <div className="bg-white/90 backdrop-blur-md border border-slate-200/80 rounded-2xl p-5 space-y-2 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest font-mono border-b border-slate-200/80 pb-2.5 mb-3">
-              Administrative Nodes
+              Admin Sections
             </h3>
             
             <div className="space-y-1.5">
@@ -491,7 +491,7 @@ Security Level:    RESTRICTED - LEVEL 4
                 }`}
               >
                 <span className="flex items-center gap-2">
-                  <User className="w-4 h-4" /> Employee Database & PII
+                  <User className="w-4 h-4" /> Staff Directory & PII
                 </span>
                 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -506,7 +506,7 @@ Security Level:    RESTRICTED - LEVEL 4
                 }`}
               >
                 <span className="flex items-center gap-2">
-                  <FolderLock className="w-4 h-4" /> File Vault Explorer
+                  <FolderLock className="w-4 h-4" /> Restricted File Vault
                 </span>
                 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -521,7 +521,7 @@ Security Level:    RESTRICTED - LEVEL 4
                 }`}
               >
                 <span className="flex items-center gap-2">
-                  <Key className="w-4 h-4" /> Credentials Registry
+                  <Key className="w-4 h-4" /> API Keys & Secrets
                 </span>
                 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -536,7 +536,7 @@ Security Level:    RESTRICTED - LEVEL 4
                 }`}
               >
                 <span className="flex items-center gap-2">
-                  <TerminalIcon className="w-4 h-4" /> Diagnostics Shell
+                  <TerminalIcon className="w-4 h-4" /> SSH Terminal
                 </span>
                 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -551,7 +551,7 @@ Security Level:    RESTRICTED - LEVEL 4
                 }`}
               >
                 <span className="flex items-center gap-2">
-                  <Search className="w-4 h-4" /> Global System Query
+                  <Search className="w-4 h-4" /> Search All Records
                 </span>
                 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -561,7 +561,7 @@ Security Level:    RESTRICTED - LEVEL 4
           {/* Real-time Sandbox parameters display */}
           <div className="bg-white/90 backdrop-blur-md border border-slate-200/80 rounded-2xl p-5 text-xs text-slate-600 space-y-3.5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <h4 className="font-bold text-slate-800 uppercase tracking-wider font-mono text-[10px] flex items-center gap-1.5">
-              <Cpu className="w-3.5 h-3.5 text-indigo-600" /> System Metrics
+              <Cpu className="w-3.5 h-3.5 text-indigo-600" /> Node Info
             </h4>
             
             <div className="space-y-2">

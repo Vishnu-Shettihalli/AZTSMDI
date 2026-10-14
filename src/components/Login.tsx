@@ -81,7 +81,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
               }`}
             >
               <Laptop className="w-4 h-4" />
-              <span>Employee / User Login</span>
+              <span>Employee Login</span>
             </button>
 
             <button
@@ -94,7 +94,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
               }`}
             >
               <Smartphone className="w-4 h-4 text-amber-400" />
-              <span>SOC Admin Login</span>
+              <span>Admin Login</span>
             </button>
           </div>
         </div>
@@ -119,27 +119,27 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                   Sai Vidya Institute of Technology
                 </span>
                 <h2 className="text-lg font-bold text-slate-900 mt-1">
-                  {loginRole === "admin" ? "SOC Security Admin Portal" : "Campus Internal Portal"}
+                  {loginRole === "admin" ? "Admin Security Portal" : "Campus Employee Portal"}
                 </h2>
               </div>
             </div>
 
             <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
               {loginRole === "admin" ? (
-                <>Log in to the <strong>SOC Admin Dashboard</strong> to view live threat logs, active sessions, registered users, and security forensics on phone or laptop.</>
+                <>Sign in to the <strong>Admin Dashboard</strong> to monitor active sessions, check threat logs, and manage user access from your phone or laptop.</>
               ) : (
-                <>Welcome to the official <strong>Employee Portal</strong>. Enter your registered email address and password to access institutional services and document archives.</>
+                <>Welcome! Log in with your registered email and password to access the <strong>Employee Portal</strong> and your department services.</>
               )}
             </p>
 
             <div className="border-t border-slate-100 pt-4 space-y-2 text-xs text-slate-500">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span>Zero-Trust Gateway Status: <strong>Operational</strong></span>
+                <span>System Status: <strong>All Good</strong></span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-blue-500" />
-                <span>Multi-Factor Identity Protection: <strong>Enforced</strong></span>
+                <span>Adaptive Auth: <strong>Enabled</strong></span>
               </div>
             </div>
           </motion.div>
@@ -154,10 +154,10 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             <div className="mb-6">
               <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Shield className={`w-5 h-5 ${loginRole === "admin" ? "text-amber-500" : "text-blue-600"}`} />
-                {loginRole === "admin" ? "Admin Security Sign In" : "Sign In to Account"}
+                {loginRole === "admin" ? "Admin Sign In" : "Sign In"}
               </h3>
               <p className="text-xs text-slate-500 mt-1">
-                {loginRole === "admin" ? "Enter your Admin Credentials (e.g. admin@svit.edu)" : "Enter your email address and password"}
+                {loginRole === "admin" ? "Use your admin email (e.g. admin@svit.edu)" : "Enter your college email and password"}
               </p>
             </div>
 
@@ -227,12 +227,12 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                 {loading ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    Verifying Credentials...
+                    Signing in...
                   </>
                 ) : (
                   <>
                     <Shield className="w-4 h-4" />
-                    {loginRole === "admin" ? "Sign In to Admin Console" : "Sign In to Portal"}
+                    {loginRole === "admin" ? "Sign In" : "Sign In"}
                   </>
                 )}
               </button>

@@ -821,7 +821,7 @@ app.delete("/api/employee/projects/:code", async (req, res) => {
   let owned = false;
   if (isDbConnected()) {
     try {
-      const proj = await ProjectModel.findOne({ code, username: session.username }).lean();
+      const proj = await (ProjectModel as any).findOne({ code, username: session.username }).lean();
       if (proj) {
         await ProjectModel.deleteOne({ _id: proj._id });
         owned = true;
