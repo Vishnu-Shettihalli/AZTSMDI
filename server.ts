@@ -441,8 +441,8 @@ app.post("/api/auth/login", async (req, res) => {
       // Assign EMPLOYEE_DECEPTION so Phase 4 can route this session to the
       // employee-portal honeypot rather than the admin-panel honeypot.
       const session = await createSession(normalized, "Deception", ip, userAgent, "USER", undefined, false, "EMPLOYEE_DECEPTION");
-+    // Mark this session as a synthetic demonstration
-+    session.isSimulation = true;
+    // Mark this session as a synthetic demonstration
+    session.isSimulation = true;
       const token = generateJwtToken({
         userId: session.id,
         username: normalized,

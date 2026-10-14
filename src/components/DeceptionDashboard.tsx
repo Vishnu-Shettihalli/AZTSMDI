@@ -453,7 +453,7 @@ Security Level:    RESTRICTED - LEVEL 4
               <span className="w-2 h-2 rounded-full bg-indigo-600 animate-ping"></span>
               <p className="text-[10px] font-mono font-bold tracking-widest text-indigo-700 uppercase">SVIT Corporate Internal Administration Activated</p>
             </div>
-            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">Deception Core Administration Console</h1>
+            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">Admin Deception Console</h1>
             <p className="text-xs text-slate-600 mt-0.5">
               Secure Tunnel Ref: <span className="font-mono text-indigo-700 font-semibold">{session.id}</span> | Identity: <span className="font-mono underline text-slate-800 font-semibold">{session.username}</span>
             </p>
