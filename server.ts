@@ -41,7 +41,8 @@ import {
 } from "./src/server/store.js";
 import { Session, Alert } from "./src/types.js";
 import { generateAttackerSummary } from "./src/server/gemini.js";
-import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, PolicyModel, AuditEventModel, isDbConnected, lastConnectionError } from "./src/server/db.js";
+import { connectMongoDB, UserModel, SessionModel, AlertModel, LoginFailureModel, PolicyModel, AuditEventModel, isDbConnected, lastConnectionError, ProjectModel } from "./src/server/db.js";
+import { projectsCache } from "./src/server/store.js";
 
 const getFilename = () => {
   try {
@@ -803,6 +804,44 @@ app.post("/api/employee/projects", async (req, res) => {
   const project = await addEmployeeProject(session.username, code, name, schedule);
   await addLogEntry(session.id, "Project Initiative Created", `Employee created project initiative '${code}: ${name}'`, 0);
   res.json({ status: "success", project });
+});
+
+// DELETE employee project – validates genuine session & ownership
+app.delete("/api/employee/projects/:code", async (req, res) => {
+  const { code } = req.params;
+  const sessionId = req.headers["x-session-id"] as string;
+  if (!code || !sessionId) {
+    return res.status(400).json({ status: "error", message: "Project code and session ID required." });
+  }
+  const session = await findSession(sessionId);
+  if (!session || session.status !== "Genuine") {
+    return res.status(403).json({ status: "error", message: "Unauthorized access." });
+  }
+  // Verify ownership in DB
+  let owned = false;
+  if (isDbConnected()) {
+    try {
+      const proj = await ProjectModel.findOne({ code, username: session.username }).lean();
+      if (proj) {
+        await ProjectModel.deleteOne({ _id: proj._id });
+        owned = true;
+      }
+    } catch (e) {
+      console.error("Error deleting project:", e);
+      return res.status(500).json({ status: "error", message: "Database error during deletion." });
+    }
+  }
+  // Sync in‑memory cache
+  const idx = projectsCache.findIndex(p => p.code === code && p.username === session.username);
+  if (idx !== -1) {
+    projectsCache.splice(idx, 1);
+    owned = true;
+  }
+  if (!owned) {
+    return res.status(404).json({ status: "error", message: "Project not found or not owned." });
+  }
+  await addLogEntry(session.id, "Project Removed", `Employee removed project '${code}'.`, 0);
+  return res.json({ status: "success" });
 });
 
 app.post("/api/employee/tickets", async (req, res) => {

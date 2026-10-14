@@ -141,6 +141,27 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
     }
   };
 
+  // Delete project handler – UI updates only after successful server response
+  const handleDeleteProject = async (code: string) => {
+    if (!window.confirm(`Delete project ${code}?`)) return;
+    try {
+      const res = await fetch(`/api/employee/projects/${code}`, {
+        method: "DELETE",
+        headers: getEmployeeHeaders(),
+        body: JSON.stringify({ sessionId: session.id })
+      });
+      const json = await res.json();
+      if (json.status === "success") {
+        setProjects(prev => prev.filter(p => p.code !== code));
+      } else {
+        alert(json.message || "Failed to delete project");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete project");
+    }
+  };
+
   const handleAddProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!addProjectCode || !addProjectName) return;
@@ -361,6 +382,7 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
                   <th className="font-medium pb-2">Project Name</th>
                   <th className="font-medium pb-2">Schedule Timeline</th>
                   <th className="font-medium pb-2 text-right">Status</th>
+                  <th className="font-medium pb-2 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200/50">
@@ -373,6 +395,11 @@ export default function RealDashboard({ session, onLogout }: RealDashboardProps)
                       <span className="inline-block px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider bg-emerald-50 text-emerald-800 border border-emerald-200">
                         {prj.status}
                       </span>
+                    </td>
+                    <td className="py-3 text-right">
+                      <button onClick={() => handleDeleteProject(prj.code)} className="text-slate-400 hover:text-rose-600 transition-colors p-1 cursor-pointer" title="Remove">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </td>
                   </tr>
                 ))}
