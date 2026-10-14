@@ -68,7 +68,7 @@ export default function DeceptionDashboard({ session, onLogout }: DeceptionDashb
 
   // Terminal State & Auto-scroll Ref
   const [cmdHistory, setCmdHistory] = useState<{ type: "cmd" | "out" | "error"; text: string }[]>([
-    { type: "out", text: "Aegis Secure Node v4.8.1-production Shell" },
+    { type: "out", text: "Deception Node v1.0 Shell" },
     { type: "out", text: "Initializing high-fidelity isolation sandbox node... ONLINE." },
     { type: "out", text: "Privileges: ROOT / ADMINISTRATOR. Type 'help' to review diagnostics commands." }
   ]);
@@ -453,7 +453,7 @@ Security Level:    RESTRICTED - LEVEL 4
               <span className="w-2 h-2 rounded-full bg-indigo-600 animate-ping"></span>
               <p className="text-[10px] font-mono font-bold tracking-widest text-indigo-700 uppercase">SVIT Corporate Internal Administration Activated</p>
             </div>
-            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">AEGIS Root Core Administration Console</h1>
+            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">Deception Core Administration Console</h1>
             <p className="text-xs text-slate-600 mt-0.5">
               Secure Tunnel Ref: <span className="font-mono text-indigo-700 font-semibold">{session.id}</span> | Identity: <span className="font-mono underline text-slate-800 font-semibold">{session.username}</span>
             </p>
@@ -1043,7 +1043,7 @@ Security Level:    RESTRICTED - LEVEL 4
                       <div key={idx}>
                         {item.type === "cmd" ? (
                           <div className="flex items-center gap-1 text-stone-500">
-                            <span className="text-orange-500 font-bold">root@aegis-core:~#</span>
+                            <span className="text-orange-500 font-bold">root@deception-core:~#</span>
                             <span className="text-[#f4efe8] font-semibold">{item.text}</span>
                           </div>
                         ) : item.type === "error" ? (
@@ -1058,7 +1058,7 @@ Security Level:    RESTRICTED - LEVEL 4
 
                   {/* Input form bar */}
                   <form onSubmit={handleTerminalSubmit} className="flex items-center gap-1.5 border-t border-stone-800 pt-3 mt-2">
-                    <span className="text-orange-500 font-bold">root@aegis-core:~#</span>
+                    <span className="text-orange-500 font-bold">root@deception-core:~#</span>
                     <input
                       type="text"
                       value={currentCmd}

@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { Session, LogEntry, Alert, DashboardStats, SecurityPolicy } from '../types.js';
+import { Session, LogEntry, Alert, DashboardStats, SecurityPolicy, DeceptionRole } from '../types.js';
 import { UserModel, SessionModel, AlertModel, LoginFailureModel, TaskModel, ProjectModel, TicketModel, PolicyModel, AuditEventModel, isDbConnected } from './db.js';
 import { generateAttackerSummary } from './gemini.js';
 
@@ -108,7 +108,8 @@ export async function createSession(
   userAgent: string, 
   role: string = "USER", 
   userId?: string,
-  isSimulation: boolean = false
+  isSimulation: boolean = false,
+  deceptionRole?: DeceptionRole
 ): Promise<Session> {
   const normalized = username.trim().toLowerCase();
   const uuid = "sess_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
@@ -160,6 +161,9 @@ export async function createSession(
     expiresAt: expiresAt.toISOString(),
     active: true,
     status,
+    // Only set deceptionRole when explicitly provided by trusted server-side logic.
+    // Genuine sessions and sessions without an explicit deceptionRole remain undefined.
+    ...(deceptionRole !== undefined ? { deceptionRole } : {}),
     isSimulation,
     threatScore: status === 'Deception' ? 50 : 0,
     failedAttempts: 0,
@@ -180,6 +184,9 @@ export async function createSession(
         username: session.username,
         role: role,
         status: session.status,
+        // Persist the deceptionRole field only when it is defined.
+        // Omitting it entirely ensures legacy documents remain untouched.
+        ...(deceptionRole !== undefined ? { deceptionRole } : {}),
         active: true,
         isSimulation,
         threatScore: session.threatScore,

@@ -6,6 +6,15 @@ export interface LogEntry {
   threatPoints: number;
 }
 
+/**
+ * Discriminates which deception sub-environment a session belongs to.
+ * Present only when session.status === 'Deception'.
+ *   ADMIN_DECEPTION    – attacker routed to the existing admin-panel honeypot
+ *   EMPLOYEE_DECEPTION – attacker routed to the employee-portal honeypot (Phase 4)
+ * Absent (undefined) for genuine, terminated, expired, or legacy deception sessions.
+ */
+export type DeceptionRole = 'ADMIN_DECEPTION' | 'EMPLOYEE_DECEPTION';
+
 export interface Session {
   id: string;
   sessionId?: string;
@@ -19,6 +28,13 @@ export interface Session {
   expiresAt?: string;
   active?: boolean;
   status: 'Genuine' | 'Deception' | 'Terminated' | 'Expired';
+  /**
+   * Identifies the specific deception sub-environment.
+   * Only set by trusted server-side logic; never accepted from client input.
+   * Undefined for genuine sessions, legacy deception sessions without this field,
+   * terminated sessions, and expired sessions.
+   */
+  deceptionRole?: DeceptionRole;
   threatScore: number;
   failedAttempts: number;
   logs: LogEntry[];

@@ -3,6 +3,7 @@ import { ShieldCheck, LogOut, Smartphone, Laptop, Radio, Activity } from "lucide
 import Login from "./components/Login";
 import RealDashboard from "./components/RealDashboard";
 import DeceptionDashboard from "./components/DeceptionDashboard";
+import EmployeeDeceptionDashboard from "./components/EmployeeDeceptionDashboard";
 import AdminDashboard from "./components/AdminDashboard";
 import CyberRadarBackground from "./components/CyberRadarBackground";
 
@@ -153,8 +154,12 @@ export default function App() {
           </div>
         ) : (
           <div className="max-w-7xl mx-auto">
-            {session?.status === "Deception" || session?.type === "Deception" ? (
-              <DeceptionDashboard session={session} onLogout={handleLogout} />
+            {session?.status === "Deception" ? (
+              session?.deceptionRole === "EMPLOYEE_DECEPTION" ? (
+                <EmployeeDeceptionDashboard session={session} onLogout={handleLogout} />
+              ) : (
+                <DeceptionDashboard session={session} onLogout={handleLogout} />
+              )
             ) : (
               <RealDashboard session={session} onLogout={handleLogout} />
             )}

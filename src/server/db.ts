@@ -28,6 +28,11 @@ export interface ISession {
   expiresAt?: Date;
   active?: boolean;
   status: "Genuine" | "Deception" | "Terminated" | "Expired";
+  /**
+   * Identifies the specific deception sub-environment.
+   * Only populated by server-side logic; undefined on genuine / legacy sessions.
+   */
+  deceptionRole?: "ADMIN_DECEPTION" | "EMPLOYEE_DECEPTION";
   isSimulation?: boolean;
   threatScore: number;
   failedAttempts: number;
@@ -77,6 +82,12 @@ const sessionSchema = new mongoose.Schema<ISession>({
   expiresAt: { type: Date, index: true },
   active: { type: Boolean, default: true, index: true },
   status: { type: String, enum: ["Genuine", "Deception", "Terminated", "Expired"], default: "Genuine", required: true },
+  /**
+   * Deception sub-environment discriminant.
+   * No default — absent from all existing genuine and legacy deception sessions.
+   * Populated only by server-side createSession() when status === 'Deception'.
+   */
+  deceptionRole: { type: String, enum: ["ADMIN_DECEPTION", "EMPLOYEE_DECEPTION"] },
   isSimulation: { type: Boolean, default: false },
   threatScore: { type: Number, default: 0 },
   failedAttempts: { type: Number, default: 0 },

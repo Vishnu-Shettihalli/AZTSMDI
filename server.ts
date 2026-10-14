@@ -113,6 +113,10 @@ app.get("/api/health", async (req, res) => {
 export async function findSession(sessionId: string): Promise<any> {
   if (!sessionId) return null;
   let session = sessions.find(s => s.id === sessionId);
+  // If a cached session exists and is terminated or inactive, honor it immediately.
+  if (session && (session.active === false || session.status === "Terminated" || session.status === "Expired")) {
+    return session;
+  }
 
   if (isDbConnected()) {
     try {
@@ -126,6 +130,9 @@ export async function findSession(sessionId: string): Promise<any> {
           userAgent: dbSess.userAgent || "Browser",
           loginTime: dbSess.loginTime || new Date().toISOString(),
           status: dbSess.status,
+          // Forward the server-assigned deception sub-environment discriminant.
+          // undefined when absent (genuine sessions and legacy deception sessions).
+          ...(dbSess.deceptionRole ? { deceptionRole: dbSess.deceptionRole } : {}),
           threatScore: dbSess.threatScore || 0,
           failedAttempts: dbSess.failedAttempts || 0,
           logs: dbSess.logs || [],
@@ -243,13 +250,35 @@ export const intelligentApiGateway = async (req: express.Request, res: express.R
   const role = (jwtPayload?.role || session?.role || "USER").toUpperCase();
   const status = session?.status || jwtPayload?.status || "Genuine";
 
-  const isEmployeeRoute = req.path.startsWith("/api/employee") || req.path.startsWith("/api/real");
+  const isEmployeeRoute = req.path.startsWith("/api/employee") && !req.path.startsWith("/api/employee-deception");
   const isDeceptionRoute = req.path.startsWith("/api/deception");
   const isAdminRoute = req.path.startsWith("/api/admin");
+  // Employee-deception namespace: isolated honeypot for EMPLOYEE_DECEPTION sessions only
+  const isEmpDeceptionRoute = req.path.startsWith("/api/employee-deception");
 
   // Deception session isolation: DECEPTION sessions CANNOT access Admin or Employee endpoints
   if (status === "Deception" && (isAdminRoute || isEmployeeRoute)) {
-    return res.status(403).json({ status: "error", message: "Access Denied: Session restricted to Aegis Deception Environment." });
+    return res.status(403).json({ status: "error", message: "Access Denied: Session restricted to deception environment." });
+  }
+
+  // EMPLOYEE_DECEPTION sessions must NOT access the Admin-panel honeypot (/api/deception/*)
+  if (isDeceptionRoute && session?.deceptionRole === "EMPLOYEE_DECEPTION") {
+    return res.status(403).json({ status: "error", message: "Access Denied: Endpoint unavailable in this deception environment." });
+  }
+
+  // /api/employee-deception/* is ONLY accessible to EMPLOYEE_DECEPTION sessions.
+  // Genuine sessions, Admin sessions, ADMIN_DECEPTION sessions, and unauthenticated
+  // requests are all rejected. The client-supplied deceptionRole is never trusted —
+  // the decision is made from the server-side session object returned by findSession().
+  if (isEmpDeceptionRoute) {
+    if (!session || session.status !== "Deception" || session.deceptionRole !== "EMPLOYEE_DECEPTION") {
+      return res.status(403).json({ status: "error", message: "Access Denied: Employee deception zone requires a valid EMPLOYEE_DECEPTION session." });
+    }
+  }
+
+  // Genuine sessions CANNOT access the employee-deception namespace
+  if (status === "Genuine" && isEmpDeceptionRoute) {
+    return res.status(403).json({ status: "error", message: "Access Denied: Deception environment is inaccessible to genuine profiles." });
   }
 
   // Terminated or Revoked session rejection on Employee routes
@@ -409,7 +438,11 @@ app.post("/api/auth/login", async (req, res) => {
       }
       delete loginFailures[normalized];
 
-      const session = await createSession(normalized, "Deception", ip, userAgent, "USER");
+      // Assign EMPLOYEE_DECEPTION so Phase 4 can route this session to the
+      // employee-portal honeypot rather than the admin-panel honeypot.
+      const session = await createSession(normalized, "Deception", ip, userAgent, "USER", undefined, false, "EMPLOYEE_DECEPTION");
++    // Mark this session as a synthetic demonstration
++    session.isSimulation = true;
       const token = generateJwtToken({
         userId: session.id,
         username: normalized,
@@ -528,6 +561,12 @@ app.post("/api/auth/admin-login", async (req, res) => {
     }
 
     if (authenticatedAdminUser) {
+      // Successful genuine admin login — reset any recorded failure counter.
+      if (isDbConnected()) {
+        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+      }
+      delete loginFailures[normalized];
+
       const session = await createSession(authenticatedAdminUser.username, "Genuine", ip, userAgent, "ADMIN", authenticatedAdminUser.id);
       const token = generateJwtToken({
         userId: authenticatedAdminUser.id || session.id,
@@ -548,7 +587,73 @@ app.post("/api/auth/admin-login", async (req, res) => {
       });
     }
 
-    // 5. If configuration is missing in production and DB has no admin
+    // 5. Track repeated failed Admin login attempts and silently divert to ADMIN_DECEPTION
+    //    after the same 3-attempt threshold used for employee logins.
+    //    The response is deliberately identical to a normal 401 so no account-existence
+    //    information is leaked (deception branch is triggered transparently on the 3rd fail).
+    let adminFailCount = 0;
+    if (isDbConnected()) {
+      try {
+        const existing = await (LoginFailureModel as any).findOne({ username: normalized }).lean();
+        adminFailCount = existing ? (existing.count || 0) + 1 : 1;
+        await (LoginFailureModel as any).updateOne(
+          { username: normalized },
+          { $set: { count: adminFailCount, lastAttempt: new Date().toISOString() } },
+          { upsert: true }
+        );
+      } catch (err) {
+        console.error("Error tracking admin login failure in DB:", err);
+        const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
+        failures.count += 1;
+        failures.lastAttempt = Date.now();
+        loginFailures[normalized] = failures;
+        adminFailCount = failures.count;
+      }
+    } else {
+      const failures = loginFailures[normalized] || { count: 0, lastAttempt: Date.now() };
+      failures.count += 1;
+      failures.lastAttempt = Date.now();
+      loginFailures[normalized] = failures;
+      adminFailCount = failures.count;
+    }
+
+    if (adminFailCount >= 3) {
+      // Threshold breached — silently divert to the existing Admin-panel honeypot.
+      // The attacker receives HTTP 200 and a Deception session with ADMIN_DECEPTION,
+      // indistinguishable from a genuine admin login from their perspective.
+      if (isDbConnected()) {
+        await (LoginFailureModel as any).deleteOne({ username: normalized }).catch(() => {});
+      }
+      delete loginFailures[normalized];
+
+      const deceptionSession = await createSession(
+        normalized, "Deception", ip, userAgent, "USER", undefined, false, "ADMIN_DECEPTION"
+      );
+      const deceptionToken = generateJwtToken({
+        userId: deceptionSession.id,
+        username: normalized,
+        role: "USER",          // Never ADMIN — deception sessions have no admin privileges
+        sessionId: deceptionSession.id,
+        status: "Deception"
+      });
+      await addLogEntry(
+        deceptionSession.id,
+        "Admin Brute Force Threshold Breached",
+        `Repeated failed Admin login attempts (${adminFailCount} attempts). Silently diverted to Admin deception environment.`,
+        35
+      );
+      // Return the same shape as a successful admin login so the frontend renders
+      // the deception environment. The session status === 'Deception' means
+      // requireAdmin and intelligentApiGateway will reject any real admin API calls.
+      return res.json({
+        status: "success",
+        token: deceptionToken,
+        role: "user",           // Intentionally 'user' — deception route in App.tsx
+        session: deceptionSession
+      });
+    }
+
+    // 6. If configuration is missing in production and DB has no admin
     if (!envAdminUser && !envAdminPass && !envAdminPassHash && (!isDbConnected() || !(await (UserModel as any).countDocuments({ role: "ADMIN" }).catch(() => 0)))) {
       return res.status(500).json({
         status: "error",
@@ -556,6 +661,8 @@ app.post("/api/auth/admin-login", async (req, res) => {
       });
     }
 
+    // Standard failure — same message regardless of whether the username exists.
+    await createAlert("warning", `Failed Admin login attempt for '${normalized}' (Attempt ${adminFailCount}/3).`, "auth_system");
     return res.status(401).json({
       status: "error",
       message: "Invalid SOC Admin credentials."
@@ -907,6 +1014,156 @@ app.post("/api/deception/action/:sessionId", async (req, res) => {
 });
 
 // ==========================================
+// EMPLOYEE DECEPTION DASHBOARD ENDPOINTS (SHADOW EMPLOYEE ZONE)
+// Authorization: session.status === "Deception" AND session.deceptionRole === "EMPLOYEE_DECEPTION"
+// No real business collections are read or written. All data is synthetic.
+// ==========================================
+
+/**
+ * Isolated synthetic employee data served to EMPLOYEE_DECEPTION sessions.
+ * These constants live only in server memory — never written to any DB collection.
+ */
+const EMPLOYEE_DECEPTION_DATA = {
+  profile: {
+    department: "Network Operations",
+    position: "Level 2 Technician",
+    staffId: "SVIT_EMP_2026_7741",
+    payrollStatus: "Disbursed (Verified)",
+    leaveBalance: "12 / 24 Days",
+    clearanceLevel: "LEVEL 2 APPROVED",
+    clearancePct: 50
+  },
+  tasks: [
+    { id: "dtask_001", title: "Verify cable routes in Server Room B", completed: true },
+    { id: "dtask_002", title: "Update network switch firmware — Rack 3", completed: false },
+    { id: "dtask_003", title: "Submit quarterly incident summary report", completed: false },
+    { id: "dtask_004", title: "Run scheduled UPS battery load test", completed: true }
+  ],
+  projects: [
+    { code: "PRJ-555", name: "Campus VPN Rollout — Phase 2", schedule: "Deadline: Nov 20", status: "Active" },
+    { code: "PRJ-612", name: "Fibre Backbone Inspection & Audit", schedule: "Deadline: Dec 05", status: "Active" },
+    { code: "PRJ-489", name: "Endpoint Compliance Validation", schedule: "Deadline: Jan 15", status: "Pending Review" }
+  ],
+  systemPostures: {
+    switchFabric: "Operational (48-port)",
+    vpnTunnel: "Secure (6 Active Tunnels)",
+    threatLevel: "Low / Normal",
+    endpoints: "18/18 Compliant"
+  }
+};
+
+/**
+ * Helper: validate that a session is a live EMPLOYEE_DECEPTION session.
+ * Returns the session or null. Never trusts client-provided fields.
+ */
+async function resolveEmpDeceptionSession(sessionId: string): Promise<any> {
+  if (!sessionId) return null;
+  const session = await findSession(sessionId);
+  if (
+    !session ||
+    session.status !== "Deception" ||
+    session.deceptionRole !== "EMPLOYEE_DECEPTION" ||
+    session.active === false
+  ) return null;
+  return session;
+}
+
+/** GET /api/employee-deception/dashboard/:sessionId
+ *  Returns the isolated synthetic employee dashboard payload.
+ *  Records a "Dashboard Accessed" telemetry event.
+ */
+app.get("/api/employee-deception/dashboard/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const session = await resolveEmpDeceptionSession(sessionId);
+  if (!session) {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Valid EMPLOYEE_DECEPTION session required." });
+  }
+
+  await addLogEntry(
+    session.id,
+    "Employee Deception Dashboard Accessed",
+    "Attacker loaded the employee-portal honeypot dashboard.",
+    10
+  );
+
+  return res.json({
+    status: "success",
+    data: EMPLOYEE_DECEPTION_DATA
+  });
+});
+
+/** POST /api/employee-deception/action/:sessionId
+ *  Records a decoy employee interaction (task view, project click, ticket submit).
+ *  Returns a synthetic success response; no real collection is written.
+ *  Idempotency note: each call is intentionally recorded as a distinct event
+ *  because each client-side interaction represents a new attacker action.
+ */
+app.post("/api/employee-deception/action/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const { action, details, threatPoints } = req.body;
+  const session = await resolveEmpDeceptionSession(sessionId);
+  if (!session) {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Valid EMPLOYEE_DECEPTION session required." });
+  }
+
+  if (!action) {
+    return res.status(400).json({ status: "error", message: "Action description is required." });
+  }
+
+  const safePoints = Math.min(50, Math.max(0, Number(threatPoints) || 15));
+  await addLogEntry(
+    session.id,
+    `[EMP-DECEPTION] ${String(action).substring(0, 120)}`,
+    `DECOY INTERACTION — ${String(details || action).substring(0, 200)}`,
+    safePoints
+  );
+
+  return res.json({
+    status: "success",
+    feedback: "Request submitted. Processing in secure operations queue."
+  });
+});
+
+/** POST /api/employee-deception/ticket/:sessionId
+ *  Simulates an IT helpdesk ticket submission.
+ *  Returns a synthetic ticket ID; nothing is written to TicketModel.
+ */
+app.post("/api/employee-deception/ticket/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const { category, text } = req.body;
+  const session = await resolveEmpDeceptionSession(sessionId);
+  if (!session) {
+    return res.status(403).json({ status: "error", message: "Unauthorized: Valid EMPLOYEE_DECEPTION session required." });
+  }
+
+  if (!text) {
+    return res.status(400).json({ status: "error", message: "Ticket text is required." });
+  }
+
+  const fakeTicketId = "TKT-DEC-" + Math.floor(1000 + Math.random() * 9000);
+  const safeCategory = String(category || "IT Support").substring(0, 50);
+  const safeText = String(text).substring(0, 300);
+
+  await addLogEntry(
+    session.id,
+    "[EMP-DECEPTION] IT Ticket Submitted",
+    `DECOY TICKET [${safeCategory}]: '${safeText.substring(0, 80)}' — assigned ID ${fakeTicketId}`,
+    20
+  );
+
+  return res.json({
+    status: "success",
+    ticket: {
+      id: fakeTicketId,
+      category: safeCategory,
+      text: safeText,
+      status: "Open",
+      date: new Date().toISOString().split("T")[0]
+    }
+  });
+});
+
+// ==========================================
 // ADMIN MONITORING HUB ENDPOINTS (PROTECTED BY requireAdmin)
 // ==========================================
 
@@ -989,6 +1246,7 @@ app.get("/api/admin/sessions", requireAdmin, async (req, res) => {
           userAgent: s.userAgent || "Browser",
           loginTime: s.loginTime || new Date().toISOString(),
           status: s.status,
+          ...(s.deceptionRole ? { deceptionRole: s.deceptionRole } : {}),
           threatScore: s.threatScore || 0,
           failedAttempts: s.failedAttempts || 0,
           generatingSummary: s.generatingSummary || false,
@@ -1034,6 +1292,7 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
           userAgent: s.userAgent || "Browser",
           loginTime: s.loginTime || new Date().toISOString(),
           status: s.status,
+          ...(s.deceptionRole ? { deceptionRole: s.deceptionRole } : {}),
           threatScore: s.threatScore || 0,
           failedAttempts: s.failedAttempts || 0,
           generatingSummary: s.generatingSummary || false,
@@ -1107,6 +1366,9 @@ app.get("/api/admin/events-poll", requireAdmin, async (req, res) => {
             lastActivityAt: s.lastActivityAt || s.loginTime,
             expiresAt: s.expiresAt ? new Date(s.expiresAt).toISOString() : undefined,
             status: s.status,
+            // Propagate the server-assigned deception sub-environment discriminant.
+            // Spread-only-if-defined so genuine and legacy sessions stay clean.
+            ...(s.deceptionRole ? { deceptionRole: s.deceptionRole } : {}),
             active: s.active !== false,
             isSimulation: Boolean(s.isSimulation),
             threatScore: s.threatScore || 0,
@@ -1247,6 +1509,8 @@ app.post("/api/admin/simulate/brute", requireAdmin, async (req, res) => {
   await addLogEntry(session.id, "Read Document Content", "Accessed file 'customer_pii_export_raw.csv'. Format: CSV | Size: 185 KB [SIMULATION DEMONSTRATION]", 30);
 
   await createAlert("critical", `[SIMULATION DEMO] Botnet infiltration simulation initiated for '${username}'. Diverted to Deception zone.`, session.id);
++    // Attach simulation marker to alert via message prefix (already present)
++    // No dedicated field in Alert model; using message prefix for identification
 
   res.json({ status: "success", message: "Infiltration simulation triggered.", session });
 });
@@ -1274,7 +1538,7 @@ app.get("/api/admin/download-report/:sessionId", requireAdmin, async (req, res) 
   });
 
   res.setHeader("Content-Type", "text/csv");
-  res.setHeader("Content-Disposition", `attachment; filename=aegis_telemetry_report_${sessionId}.csv`);
+  res.setHeader("Content-Disposition", `attachment; filename=deception_telemetry_report_${sessionId}.csv`);
   res.status(200).send(csvContent);
 });
 
